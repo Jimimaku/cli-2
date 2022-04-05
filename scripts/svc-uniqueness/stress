@@ -1,0 +1,14 @@
+#! /usr/bin/env bash
+
+max=200
+cap=100
+
+for ((i = 0; i < ${max}; i++)); do
+  state-svc foreground &
+  svcs="$(pgrep state-svc)"
+  if [[ "$(echo "${svcs}" | wc -l)" -gt "${cap}" ]]; then
+    echo "${svcs}"
+    echo 2>&1 "multiple procs found" && exit 1
+  fi
+  [[ "${i}" -eq "999" ]] && echo "${svcs}"
+done
