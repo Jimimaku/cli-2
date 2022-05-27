@@ -14,6 +14,7 @@ type SignalError struct {
 
 // Error returns an message about the received event
 func (se SignalError) Error() string {
+	fmt.Println("SIGNALED")
 	return fmt.Sprintf("caught a signal: %v", se.sig.String())
 }
 

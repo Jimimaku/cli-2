@@ -75,6 +75,9 @@ var (
 )
 
 func init() {
+	if true {
+		return
+	}
 	PersistentUsername = os.Getenv("INTEGRATION_TEST_USERNAME")
 	PersistentPassword = os.Getenv("INTEGRATION_TEST_PASSWORD")
 	PersistentToken = os.Getenv("INTEGRATION_TEST_TOKEN")
@@ -517,7 +520,7 @@ func (s *Session) Close() error {
 		s.t.Log("PLATFORM_API_TOKEN env var not set, not running suite tear down")
 		return nil
 	}
-	
+
 	a := auth.New(cfg)
 
 	for _, user := range s.users {

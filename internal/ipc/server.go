@@ -3,6 +3,7 @@ package ipc
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net"
 	"sync"
 	"time"
@@ -99,6 +100,7 @@ func (ipc *Server) Start() error {
 			defer wg.Done()
 
 			<-ipc.donec
+			fmt.Println("TOKENED")
 			listener.Close()
 		}()
 
