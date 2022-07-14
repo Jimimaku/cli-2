@@ -2,6 +2,7 @@ package integration
 
 import (
 	"fmt"
+	"os"
 	"os/exec"
 	"path/filepath"
 	"regexp"
@@ -46,7 +47,7 @@ func (suite *ActivateIntegrationTestSuite) TestActivateWithoutRuntime() {
 	defer ts.Close()
 
 	cp := ts.Spawn("activate", "ActiveState-CLI/Python2")
-	cp.Expect("Activated")
+	cp.Expect("Activated", 30*time.Second)
 	cp.WaitForInput()
 
 	cp.SendLine("exit 123")
@@ -427,7 +428,7 @@ func (suite *ActivateIntegrationTestSuite) TestActivate_JSON() {
 		e2e.WithArgs("activate", "ActiveState-CLI/small-python", "--output", "json", "--path", ts.Dirs.Work),
 		e2e.AppendEnv("ACTIVESTATE_CLI_DISABLE_RUNTIME=false"),
 	)
-	cp.Expect(`"ACTIVESTATE_ACTIVATED":"`)
+	cp.Expect(`"ACTIVESTATE_ACTIVATED":"`, 60*time.Second)
 	cp.ExpectExitCode(0)
 }
 
@@ -516,4 +517,86 @@ func (suite *ActivateIntegrationTestSuite) TestActivate_AlreadyActive_DifferentN
 	cp.SendLine(fmt.Sprintf("state activate %s", "ActiveState-CLI/Perl-5.32"))
 	cp.Expect("You cannot activate a new project when you are already in an activated state")
 	cp.WaitForInput()
+}
+
+func (suite *ActivateIntegrationTestSuite) TestActivateBranch() {
+	suite.OnlyRunForTags(tagsuite.Activate)
+
+	ts := e2e.New(suite.T(), false)
+	defer ts.Close()
+
+	namespace := "ActiveState-CLI/Branches"
+
+	cp := ts.SpawnWithOpts(
+		e2e.WithArgs("activate", namespace, "--branch", "firstbranch"),
+		e2e.AppendEnv("ACTIVESTATE_CLI_DISABLE_RUNTIME=false"),
+	)
+
+	cp.Expect("Activated")
+	cp.SendLine("exit")
+	cp.ExpectExitCode(0)
+}
+
+func (suite *ActivateIntegrationTestSuite) TestActivateBranchNonExistant() {
+	suite.OnlyRunForTags(tagsuite.Activate)
+
+	ts := e2e.New(suite.T(), false)
+	defer ts.Close()
+
+	namespace := "ActiveState-CLI/Branches"
+
+	cp := ts.SpawnWithOpts(
+		e2e.WithArgs("activate", namespace, "--branch", "does-not-exist"),
+		e2e.AppendEnv("ACTIVESTATE_CLI_DISABLE_RUNTIME=false"),
+	)
+
+	cp.Expect("has no branch")
+}
+
+func (suite *ActivateIntegrationTestSuite) TestActivateArtifactsCached() {
+	suite.OnlyRunForTags(tagsuite.Activate)
+
+	ts := e2e.New(suite.T(), false)
+	defer ts.Close()
+
+	namespace := "ActiveState-CLI/Python3"
+
+	cp := ts.SpawnWithOpts(
+		e2e.WithArgs("activate", namespace),
+		e2e.AppendEnv("ACTIVESTATE_CLI_DISABLE_RUNTIME=false"),
+	)
+
+	cp.Expect("Activated")
+	cp.SendLine("exit")
+	cp.ExpectExitCode(0)
+
+	artifactCacheDir := filepath.Join(ts.Dirs.Cache, constants.ArtifactMetaDir)
+	suite.True(fileutils.DirExists(artifactCacheDir), "artifact cache directory does not exist")
+	artifactInfoJson := filepath.Join(artifactCacheDir, constants.ArtifactCacheFileName)
+	suite.True(fileutils.FileExists(artifactInfoJson), "artifact cache info json file does not exist")
+
+	files, err := fileutils.ListDir(artifactCacheDir, false)
+	suite.NoError(err)
+	suite.True(len(files) > 1, "artifact cache is empty") // ignore json file
+
+	// Clear all cached data except artifact cache.
+	// This removes the runtime so that it needs to be created again.
+	files, err = fileutils.ListDir(ts.Dirs.Cache, true)
+	suite.NoError(err)
+	for _, entry := range files {
+		if entry.IsDir() && entry.RelativePath() != constants.ArtifactMetaDir {
+			fmt.Println("removing " + entry.Path())
+			os.RemoveAll(entry.Path())
+		}
+	}
+
+	cp = ts.SpawnWithOpts(
+		e2e.WithArgs("activate", namespace),
+		e2e.AppendEnv("ACTIVESTATE_CLI_DISABLE_RUNTIME=false", "VERBOSE=true"),
+	)
+
+	cp.Expect("Fetched cached artifact")
+	cp.Expect("Activated")
+	cp.SendLine("exit")
+	cp.ExpectExitCode(0)
 }

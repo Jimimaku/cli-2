@@ -6,9 +6,10 @@ import (
 	"os/user"
 	"path/filepath"
 
-	"github.com/ActiveState/cli/internal/appinfo"
 	"github.com/ActiveState/cli/internal/assets"
+	"github.com/ActiveState/cli/internal/constants"
 	"github.com/ActiveState/cli/internal/fileutils"
+	"github.com/ActiveState/cli/internal/installation"
 	"github.com/ActiveState/cli/internal/locale"
 	"github.com/ActiveState/cli/internal/multilog"
 	"github.com/ActiveState/cli/internal/osutils"
@@ -18,7 +19,7 @@ import (
 
 var shortcutDir = filepath.Join(os.Getenv("USERPROFILE"), "AppData", "Roaming", "Microsoft", "Windows", "Start Menu", "Programs", "ActiveState")
 
-func (r *Prepare) prepareOS() {
+func (r *Prepare) prepareOS() error {
 	err := setStateProtocol()
 	if err != nil {
 		r.reportError(locale.T("prepare_protocol_warning"), err)
@@ -27,6 +28,8 @@ func (r *Prepare) prepareOS() {
 	if err := r.prepareStartShortcut(); err != nil {
 		r.reportError(locale.Tl("err_prepare_shortcut", "Could not create start menu shortcut, error received: {{.V0}}.", err.Error()), err)
 	}
+
+	return nil
 }
 
 func (r *Prepare) prepareStartShortcut() error {
@@ -34,11 +37,16 @@ func (r *Prepare) prepareStartShortcut() error {
 		return locale.WrapInputError(err, "err_preparestart_mkdir", "Could not create start menu entry: %s", shortcutDir)
 	}
 
-	appInfo := appinfo.TrayApp()
-	sc := shortcut.New(shortcutDir, appInfo.Name(), appInfo.Exec())
-	err := sc.Enable()
+	trayExec, err := installation.TrayExec()
 	if err != nil {
-		return locale.WrapError(err, "err_preparestart_shortcut", "Could not create shortcut")
+		return locale.WrapError(err, "err_tray_exec")
+	}
+
+	sc := shortcut.New(shortcutDir, constants.TrayAppName, trayExec)
+
+	err = sc.Enable()
+	if err != nil {
+		return locale.WrapError(err, "err_preparestart_shortcut", "", sc.Path())
 	}
 
 	icon, err := assets.ReadFileBytes("icon.ico")
@@ -47,7 +55,13 @@ func (r *Prepare) prepareStartShortcut() error {
 	}
 	err = sc.SetIconBlob(icon)
 	if err != nil {
-		return locale.WrapError(err, "err_preparestart_icon", "Could not set icon for shortcut file")
+		return locale.WrapError(err, "err_preparestart_icon", "", sc.Path())
+	}
+
+	sc = shortcut.New(shortcutDir, "Uninstall State Tool", r.subshell.Binary(), "/C \"state clean uninstall\"")
+	err = sc.Enable()
+	if err != nil {
+		return locale.WrapError(err, "err_preparestart_shortcut", "", sc.Path())
 	}
 
 	return nil
@@ -111,10 +125,14 @@ func setStateProtocol() error {
 }
 
 // InstalledPreparedFiles returns the files installed by the state _prepare command
-func InstalledPreparedFiles(cfg autostart.Configurable) []string {
+func InstalledPreparedFiles(cfg autostart.Configurable) ([]string, error) {
 	var files []string
-	trayInfo := appinfo.TrayApp()
-	name, exec := trayInfo.Name(), trayInfo.Exec()
+	trayExec, err := installation.TrayExec()
+	if err != nil {
+		return nil, locale.WrapError(err, "err_tray_exec")
+	}
+
+	name, exec := constants.TrayAppName, trayExec
 
 	as, err := autostart.New(name, exec, cfg).Path()
 	if err != nil {
@@ -122,9 +140,9 @@ func InstalledPreparedFiles(cfg autostart.Configurable) []string {
 	} else if as != "" {
 		files = append(files, as)
 	}
-	appInfo := appinfo.TrayApp()
-	sc := shortcut.New(shortcutDir, appInfo.Name(), appInfo.Exec())
+
+	sc := shortcut.New(shortcutDir, constants.TrayAppName, trayExec)
 	files = append(files, filepath.Dir(sc.Path()))
 
-	return files
+	return files, nil
 }

@@ -8,7 +8,6 @@ import (
 	"strings"
 
 	anaConst "github.com/ActiveState/cli/internal/analytics/constants"
-	"github.com/ActiveState/cli/internal/appinfo"
 	"github.com/ActiveState/cli/internal/config"
 	"github.com/ActiveState/cli/internal/constants"
 	"github.com/ActiveState/cli/internal/errs"
@@ -29,17 +28,18 @@ import (
 type Installer struct {
 	out          output.Outputer
 	cfg          *config.Instance
+	payloadPath  string
 	sessionToken string
 	*Params
 }
 
-func NewInstaller(cfg *config.Instance, out output.Outputer, params *Params) (*Installer, error) {
-	i := &Installer{cfg: cfg, out: out, Params: params}
+func NewInstaller(cfg *config.Instance, out output.Outputer, payloadPath string, params *Params) (*Installer, error) {
+	i := &Installer{cfg: cfg, out: out, payloadPath: payloadPath, Params: params}
 	if err := i.sanitizeInput(); err != nil {
 		return nil, errs.Wrap(err, "Could not sanitize input")
 	}
 
-	logging.Debug("Instantiated installer with source dir: %s, target dir: %s", i.sourcePath, i.path)
+	logging.Debug("Instantiated installer with source dir: %s, target dir: %s", i.payloadPath, i.path)
 
 	return i, nil
 }
@@ -94,7 +94,7 @@ func (i *Installer) Install() (rerr error) {
 	}
 
 	// Copy all the files
-	if err := fileutils.CopyAndRenameFiles(i.sourcePath, i.path); err != nil {
+	if err := fileutils.CopyAndRenameFiles(i.payloadPath, i.path); err != nil {
 		return errs.Wrap(err, "Failed to copy installation files to dir %s. Error received: %s", i.path, errs.JoinMessage(err))
 	}
 
@@ -120,15 +120,25 @@ func (i *Installer) Install() (rerr error) {
 		return errs.Wrap(err, "Failed to set current privilege level in config")
 	}
 
+	stateExec, err := installation.StateExecFromDir(binDir)
+	if err != nil {
+		return locale.WrapError(err, "err_state_exec")
+	}
+
 	// Run state _prepare after updates to facilitate anything the new version of the state tool might need to set up
 	// Yes this is awkward, followup story here: https://www.pivotaltracker.com/story/show/176507898
-	if stdout, stderr, err := exeutils.ExecSimple(appinfo.StateApp(binDir).Exec(), "_prepare"); err != nil {
+	if stdout, stderr, err := exeutils.ExecSimple(stateExec, []string{"_prepare"}, []string{}); err != nil {
 		multilog.Error("_prepare failed after update: %v\n\nstdout: %s\n\nstderr: %s", err, stdout, stderr)
 	}
 
 	// Restart ActiveState Desktop, if it was running prior to installing
 	if trayRunning {
-		if _, err := exeutils.ExecuteAndForget(appinfo.TrayApp(binDir).Exec(), []string{}); err != nil {
+		trayExec, err := installation.TrayExecFromDir(binDir)
+		if err != nil {
+			return locale.WrapError(err, "err_tray_exec_dir", "", binDir)
+		}
+
+		if _, err := exeutils.ExecuteAndForget(trayExec, []string{}); err != nil {
 			multilog.Error("Could not start state-tray: %s", errs.JoinMessage(err))
 		}
 	}

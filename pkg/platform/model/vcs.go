@@ -11,7 +11,6 @@ import (
 	"github.com/ActiveState/cli/internal/errs"
 	"github.com/ActiveState/cli/internal/locale"
 	"github.com/ActiveState/cli/internal/logging"
-	"github.com/ActiveState/cli/internal/machineid"
 	"github.com/ActiveState/cli/internal/multilog"
 	"github.com/ActiveState/cli/internal/retryhttp"
 	"github.com/ActiveState/cli/internal/singleton/uniqid"
@@ -346,9 +345,9 @@ func commonParentWithHistory(commit1, commit2 *strfmt.UUID, history1, history2 [
 }
 
 // CommitsBehind compares the provided commit id with the latest commit
-// id and returns the count of commits it is behind. If an error is returned
-// along with a value of -1, then the provided commit is more than likely
-// behind, but it is not possible to clarify the count exactly.
+// id and returns the count of commits it is behind. A negative return value
+// indicates the provided commit id is ahead of the latest commit id (that is,
+// there are local commits).
 func CommitsBehind(latestCID, currentCommitID strfmt.UUID) (int, error) {
 	if latestCID == "" {
 		if currentCommitID == "" {
@@ -361,15 +360,26 @@ func CommitsBehind(latestCID, currentCommitID strfmt.UUID) (int, error) {
 		return 0, nil
 	}
 
-	params := vcsClient.NewGetCommitHistoryParams()
-	params.SetCommitID(latestCID)
-	res, err := mono.Get().VersionControl.GetCommitHistory(params, nil)
+	// Assume current is behind or equal to latest.
+	commits, err := CommitHistoryFromID(latestCID)
 	if err != nil {
 		return 0, locale.WrapError(err, "err_get_commit_history", "", err.Error())
 	}
 
-	indexed := makeIndexedCommits(res.Payload.Commits)
-	return indexed.countBetween(currentCommitID.String(), latestCID.String())
+	indexed := makeIndexedCommits(commits)
+	if behind, err := indexed.countBetween(currentCommitID.String(), latestCID.String()); err == nil {
+		return behind, nil
+	}
+
+	// Assume current is ahead of latest.
+	commits, err = CommitHistoryFromID(currentCommitID)
+	if err != nil {
+		return 0, locale.WrapError(err, "err_get_commit_history", "", err.Error())
+	}
+
+	indexed = makeIndexedCommits(commits)
+	ahead, err := indexed.countBetween(latestCID.String(), currentCommitID.String())
+	return -ahead, err
 }
 
 // Changeset aliases for eased usage and to act as a disconnect from the underlying dep.
@@ -383,7 +393,6 @@ func AddChangeset(parentCommitID strfmt.UUID, commitMessage string, changeset Ch
 		Changeset:      changeset,
 		Message:        commitMessage,
 		ParentCommitID: parentCommitID,
-		AnonID:         machineid.UniqID(),
 		UniqueDeviceID: uniqid.Text(),
 	}
 
@@ -599,9 +608,8 @@ func makeIndexedCommits(cs []*mono_models.Commit) indexedCommits {
 	return m
 }
 
-// countBetween returns 0 if same or if unable to determine the count. If the
-// last commit is empty, -1 is returned. Caution: Currently, the logic does not
-// verify that the first commit is "before" the last commit.
+// countBetween returns 0 if same or if unable to determine the count.
+// Caution: Currently, the logic does not verify that the first commit is "before" the last commit.
 func (cs indexedCommits) countBetween(first, last string) (int, error) {
 	if first == last {
 		return 0, nil

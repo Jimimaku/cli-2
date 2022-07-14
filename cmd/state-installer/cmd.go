@@ -10,7 +10,6 @@ import (
 
 	"github.com/ActiveState/cli/internal/analytics"
 	"github.com/ActiveState/cli/internal/analytics/client/sync"
-	"github.com/ActiveState/cli/internal/appinfo"
 	"github.com/ActiveState/cli/internal/captain"
 	"github.com/ActiveState/cli/internal/config"
 	"github.com/ActiveState/cli/internal/constants"
@@ -22,7 +21,6 @@ import (
 	"github.com/ActiveState/cli/internal/installation/storage"
 	"github.com/ActiveState/cli/internal/locale"
 	"github.com/ActiveState/cli/internal/logging"
-	"github.com/ActiveState/cli/internal/machineid"
 	"github.com/ActiveState/cli/internal/multilog"
 	"github.com/ActiveState/cli/internal/osutils"
 	"github.com/ActiveState/cli/internal/output"
@@ -30,23 +28,20 @@ import (
 	"github.com/ActiveState/cli/internal/rollbar"
 	"github.com/ActiveState/cli/internal/runbits/panics"
 	"github.com/ActiveState/cli/internal/subshell"
-	"github.com/ActiveState/cli/internal/updater"
 	"github.com/ActiveState/cli/pkg/project"
+	"github.com/ActiveState/cli/pkg/sysinfo"
 )
 
 const AnalyticsCat = "installer"
 const AnalyticsFunnelCat = "installer-funnel"
 
 type Params struct {
-	fromDeferred    bool
-	sourcePath      string
 	sourceInstaller string
 	path            string
 	updateTag       string
-	branch          string
 	command         string
-	version         string
 	force           bool
+	isUpdate        bool
 	activate        *project.Namespaced
 	activateDefault *project.Namespaced
 }
@@ -68,8 +63,8 @@ func main() {
 			exitCode = 1
 		}
 
-		if err := cfg.Close(); err != nil {
-			multilog.Error("Failed to close config: %v", err)
+		if cfg != nil {
+			events.Close("config", cfg.Close)
 		}
 
 		if err := events.WaitForEvents(5*time.Second, rollbar.Wait, an.Wait, logging.Close); err != nil {
@@ -83,19 +78,19 @@ func main() {
 	// Set up rollbar reporting
 	rollbar.SetupRollbar(constants.StateInstallerRollbarToken)
 
+	// Allow starting the installer via a double click
+	captain.DisableMousetrap()
+
 	// Set up configuration handler
-	cfg, err := config.New()
+	var err error
+	cfg, err = config.New()
 	if err != nil {
 		multilog.Error("Could not set up configuration handler: " + errs.JoinMessage(err))
 		fmt.Fprintln(os.Stderr, err.Error())
 		exitCode = 1
 	}
 
-	logging.CurrentHandler().SetConfig(cfg)
-
-	// Set up machineid, allowing us to anonymously group errors and analytics
-	machineid.Configure(cfg)
-	machineid.SetErrorLogger(logging.Error)
+	rollbar.SetConfig(cfg)
 
 	// Set up output handler
 	out, err := output.New("plain", &output.Config{
@@ -112,6 +107,7 @@ func main() {
 	}
 
 	var garbageBool bool
+	var garbageString string
 
 	// We have old install one liners around that use `-activate` instead of `--activate`
 	processedArgs := os.Args
@@ -135,16 +131,6 @@ func main() {
 		primer.New(nil, out, nil, nil, nil, nil, cfg, nil, nil, an),
 		[]*captain.Flag{ // The naming of these flags is slightly inconsistent due to backwards compatibility requirements
 			{
-				Name:        "channel",
-				Description: "Defaults to 'release'.  Specify an alternative channel to install from (eg. beta)",
-				Value:       &params.branch,
-			},
-			{
-				Shorthand: "b", // backwards compatibility
-				Hidden:    true,
-				Value:     &params.branch,
-			},
-			{
 				Name:        "command",
 				Shorthand:   "c",
 				Description: "Run any command after the install script has completed",
@@ -161,31 +147,21 @@ func main() {
 				Value:       params.activateDefault,
 			},
 			{
-				Name:        "version",
-				Shorthand:   "v",
-				Description: "The version of the State Tool to install",
-				Value:       &params.version,
-			},
-			{
 				Name:        "force",
 				Shorthand:   "f",
 				Description: "Force the installation, overwriting any version of the State Tool already installed",
 				Value:       &params.force,
 			},
 			{
+				Name:        "update",
+				Shorthand:   "u",
+				Description: "Force update behaviour for the installer",
+				Value:       &params.isUpdate,
+			},
+			{
 				Name:   "source-installer",
 				Hidden: true, // This is internally routed in via the install frontend (eg. install.sh, MSI, etc)
 				Value:  &params.sourceInstaller,
-			},
-			{
-				Name:   "source-path",
-				Hidden: true, // Source path should ideally only be used through state tool updates (ie. it's internally routed)
-				Value:  &params.sourcePath,
-			},
-			{
-				Name:   "from-deferred",
-				Hidden: true, // This is set when deferring installs to another installer, to avoid redundant UI
-				Value:  &params.fromDeferred,
 			},
 			{
 				Name:      "path",
@@ -195,6 +171,10 @@ func main() {
 			},
 			// The remaining flags are for backwards compatibility (ie. we don't want to error out when they're provided)
 			{Name: "nnn", Shorthand: "n", Hidden: true, Value: &garbageBool}, // don't prompt; useless cause we don't prompt anyway
+			{Name: "channel", Hidden: true, Value: &garbageString},
+			{Name: "bbb", Shorthand: "b", Hidden: true, Value: &garbageString},
+			{Name: "vvv", Shorthand: "v", Hidden: true, Value: &garbageString},
+			{Name: "source-path", Hidden: true, Value: &garbageString},
 		},
 		[]*captain.Argument{
 			{
@@ -221,31 +201,34 @@ func main() {
 
 		exitCode = errs.UnwrapExitCode(err)
 		an.EventWithLabel(AnalyticsFunnelCat, "fail", err.Error())
-		out.Error(err.Error())
-		return
+		if !errs.IsSilent(err) {
+			out.Error(err.Error())
+		}
+	} else {
+		an.Event(AnalyticsFunnelCat, "success")
 	}
 
-	an.Event(AnalyticsFunnelCat, "success")
+	// Installer was likely started via a double click so we keep the terminal window open
+	if noArgs() {
+		out.Print(locale.Tl("installer_pause", "Press ENTER to exit..."))
+		fmt.Scanln()
+	}
+
 }
 
 func execute(out output.Outputer, cfg *config.Instance, an analytics.Dispatcher, args []string, params *Params) error {
 	an.Event(AnalyticsFunnelCat, "exec")
 
-	targetBranch := params.branch
-	if targetBranch == "" {
-		targetBranch = constants.BranchName
-	}
-
 	if params.path == "" {
 		var err error
-		params.path, err = installation.InstallPathForBranch(targetBranch)
+		params.path, err = installation.InstallPathForBranch(constants.BranchName)
 		if err != nil {
 			return errs.Wrap(err, "Could not detect installation path.")
 		}
 	}
 
 	// Detect installed state tool
-	stateToolInstalled, installPath, err := installedOnPath(params.path, targetBranch)
+	stateToolInstalled, installPath, err := installedOnPath(params.path, constants.BranchName)
 	if err != nil {
 		return errs.Wrap(err, "Could not detect if State Tool is already installed.")
 	}
@@ -265,66 +248,65 @@ func execute(out output.Outputer, cfg *config.Instance, an analytics.Dispatcher,
 		}
 	}
 
-	// Detect state tool alongside installer executable
-	installerPath := filepath.Dir(osutils.Executable())
-	packagedStateExe := filepath.Join(installerPath, installation.BinDirName, constants.StateCmd+exeutils.Extension)
+	// We expect the installer payload to be in the same directory as the installer itself
+	payloadPath := filepath.Dir(osutils.Executable())
 
-	// Detect whether this is a fresh install or an update
-	isUpdate := false
-	switch {
-	case params.force:
-		logging.Debug("Not using update flow as --force was passed")
-		break // When ran with `--force` we always use the install UX
-	case !params.fromDeferred && fileutils.FileExists(packagedStateExe):
-		// Facilitate older versions of state tool which do not invoke the installer with `--source-path`
-		logging.Debug("Using update flow as installer is alongside payload")
-		isUpdate = true
-		params.sourcePath = installerPath
-	case stateToolInstalled:
-		// This should trigger AFTER the check above where sourcePath is defined
-		logging.Debug("Using update flow as state tool is already installed")
-		isUpdate = true
+	// Older versions of the state tool will not include the --update flag, so we
+	// need to use the legacy way of checking for update
+	// This code whould be removed in the future. See story here: https://activestatef.atlassian.net/browse/DX-985
+	if !params.isUpdate {
+		packagedStateExe := filepath.Join(payloadPath, installation.BinDirName, constants.StateCmd+exeutils.Extension)
+		params.isUpdate = determineLegacyUpdate(stateToolInstalled, packagedStateExe, payloadPath, params)
 	}
 
 	route := "install"
-	if isUpdate {
+	if params.isUpdate {
 		route = "update"
 	}
 	an.Event(AnalyticsFunnelCat, route)
 
-	// if sourcePath was provided we're already using the right installer, so proceed with installation
-	if params.sourcePath != "" {
-		if err := installOrUpdateFromLocalSource(out, cfg, an, params, isUpdate); err != nil {
-			return err
-		}
-		return postInstallEvents(out, cfg, an, params, isUpdate)
-	}
-
 	// Check if state tool already installed
-	if !params.force && stateToolInstalled {
+	if !params.isUpdate && !params.force && stateToolInstalled {
 		logging.Debug("Cancelling out because State Tool is already installed")
 		out.Print(fmt.Sprintf("State Tool Package Manager is already installed at [NOTICE]%s[/RESET]. To reinstall use the [ACTIONABLE]--force[/RESET] flag.", installPath))
 		an.Event(AnalyticsFunnelCat, "already-installed")
-		return postInstallEvents(out, cfg, an, params, true)
+		params.isUpdate = true
+		return postInstallEvents(out, cfg, an, params)
 	}
 
-	// If no sourcePath was provided then we still need to download the source files, and defer the actual
-	// installation to the installer contained within the source file
-	return installFromRemoteSource(out, cfg, an, args, params)
+	if err := installOrUpdateFromLocalSource(out, cfg, an, payloadPath, params); err != nil {
+		return err
+	}
+	storeInstallSource(params.sourceInstaller)
+	return postInstallEvents(out, cfg, an, params)
 }
 
 // installOrUpdateFromLocalSource is invoked when we're performing an installation where the payload is already provided
-func installOrUpdateFromLocalSource(out output.Outputer, cfg *config.Instance, an analytics.Dispatcher, params *Params, isUpdate bool) error {
+func installOrUpdateFromLocalSource(out output.Outputer, cfg *config.Instance, an analytics.Dispatcher, payloadPath string, params *Params) error {
 	logging.Debug("Install from local source")
 	an.Event(AnalyticsFunnelCat, "local-source")
+	if !params.isUpdate {
+		// install.sh or install.ps1 downloaded this installer and is running it.
+		out.Print(output.Title("Installing State Tool Package Manager"))
+		out.Print(`The State Tool lets you install and manage your language runtimes.` + "\n\n" +
+			`ActiveState collects usage statistics and diagnostic data about failures. ` + "\n" +
+			`By using the State Tool Package Manager you agree to the terms of ActiveState’s Privacy Policy, ` + "\n" +
+			`available at: [ACTIONABLE]https://www.activestate.com/company/privacy-policy[/RESET]` + "\n")
+	}
 
-	installer, err := NewInstaller(cfg, out, params)
+	if err := assertCompatibility(); err != nil {
+		// Don't wrap, we want the error from assertCompatibility to be returned -- installer doesn't have intelligent error handling yet
+		// https://activestatef.atlassian.net/browse/DX-957
+		return err
+	}
+
+	installer, err := NewInstaller(cfg, out, payloadPath, params)
 	if err != nil {
 		out.Print(fmt.Sprintf("[ERROR]Could not create installer: %s[/RESET]", errs.JoinMessage(err)))
 		return err
 	}
 
-	if isUpdate {
+	if params.isUpdate {
 		out.Fprint(os.Stdout, "• Installing Update... ")
 	} else {
 		out.Fprint(os.Stdout, fmt.Sprintf("• Installing State Tool to [NOTICE]%s[/RESET]... ", installer.InstallPath()))
@@ -339,7 +321,7 @@ func installOrUpdateFromLocalSource(out output.Outputer, cfg *config.Instance, a
 	an.Event(AnalyticsFunnelCat, "post-installer")
 	out.Print("[SUCCESS]✔ Done[/RESET]")
 
-	if !isUpdate {
+	if !params.isUpdate {
 		out.Print("")
 		out.Print(output.Title("State Tool Package Manager Installation Complete"))
 		out.Print("State Tool Package Manager has been successfully installed.")
@@ -348,7 +330,7 @@ func installOrUpdateFromLocalSource(out output.Outputer, cfg *config.Instance, a
 	return nil
 }
 
-func postInstallEvents(out output.Outputer, cfg *config.Instance, an analytics.Dispatcher, params *Params, isUpdate bool) error {
+func postInstallEvents(out output.Outputer, cfg *config.Instance, an analytics.Dispatcher, params *Params) error {
 	an.Event(AnalyticsFunnelCat, "post-install-events")
 
 	installPath, err := resolveInstallPath(params.path)
@@ -356,10 +338,14 @@ func postInstallEvents(out output.Outputer, cfg *config.Instance, an analytics.D
 		return errs.Wrap(err, "Could not resolve installation path")
 	}
 
-	stateExe := appinfo.StateApp(installPath).Exec()
 	binPath, err := installation.BinPathFromInstallPath(installPath)
 	if err != nil {
 		return errs.Wrap(err, "Could not detect installation bin path")
+	}
+
+	stateExe, err := installation.StateExecFromDir(installPath)
+	if err != nil {
+		return locale.WrapError(err, "err_state_exec")
 	}
 
 	// Execute requested command, these are mutually exclusive
@@ -372,7 +358,7 @@ func postInstallEvents(out output.Outputer, cfg *config.Instance, an analytics.D
 		cmd, args := exeutils.DecodeCmd(params.command)
 		if _, _, err := exeutils.ExecuteAndPipeStd(cmd, args, envSlice(binPath)); err != nil {
 			an.EventWithLabel(AnalyticsFunnelCat, "forward-command-err", err.Error())
-			return errs.Wrap(err, "Running provided command failed, error returned: %s", errs.JoinMessage(err))
+			return errs.Silence(errs.Wrap(err, "Running provided command failed, error returned: %s", errs.JoinMessage(err)))
 		}
 	// Activate provided --activate Namespace
 	case params.activate.IsValid():
@@ -381,7 +367,7 @@ func postInstallEvents(out output.Outputer, cfg *config.Instance, an analytics.D
 		out.Print(fmt.Sprintf("\nRunning `[ACTIONABLE]state activate %s[/RESET]`\n", params.activate.String()))
 		if _, _, err := exeutils.ExecuteAndPipeStd(stateExe, []string{"activate", params.activate.String()}, envSlice(binPath)); err != nil {
 			an.EventWithLabel(AnalyticsFunnelCat, "forward-activate-err", err.Error())
-			return errs.Wrap(err, "Could not activate %s, error returned: %s", params.activate.String(), errs.JoinMessage(err))
+			return errs.Silence(errs.Wrap(err, "Could not activate %s, error returned: %s", params.activate.String(), errs.JoinMessage(err)))
 		}
 	// Activate provided --activate-default Namespace
 	case params.activateDefault.IsValid():
@@ -390,9 +376,9 @@ func postInstallEvents(out output.Outputer, cfg *config.Instance, an analytics.D
 		out.Print(fmt.Sprintf("\nRunning `[ACTIONABLE]state activate --default %s[/RESET]`\n", params.activateDefault.String()))
 		if _, _, err := exeutils.ExecuteAndPipeStd(stateExe, []string{"activate", params.activateDefault.String(), "--default"}, envSlice(binPath)); err != nil {
 			an.EventWithLabel(AnalyticsFunnelCat, "forward-activate-default-err", err.Error())
-			return errs.Wrap(err, "Could not activate %s, error returned: %s", params.activateDefault.String(), errs.JoinMessage(err))
+			return errs.Silence(errs.Wrap(err, "Could not activate %s, error returned: %s", params.activateDefault.String(), errs.JoinMessage(err)))
 		}
-	case !isUpdate:
+	case !params.isUpdate:
 		ss := subshell.New(cfg)
 		ss.SetEnv(envMap(binPath))
 		if err := ss.Activate(nil, cfg, out); err != nil {
@@ -407,61 +393,17 @@ func postInstallEvents(out output.Outputer, cfg *config.Instance, an analytics.D
 }
 
 func envSlice(binPath string) []string {
-	return []string{"PATH=" + binPath + string(os.PathListSeparator) + os.Getenv("PATH")}
+	return []string{
+		"PATH=" + binPath + string(os.PathListSeparator) + os.Getenv("PATH"),
+		constants.DisableErrorTipsEnvVarName + "=true",
+	}
 }
 
 func envMap(binPath string) map[string]string {
 	return map[string]string{
 		"PATH": binPath + string(os.PathListSeparator) + os.Getenv("PATH"),
+		constants.DisableErrorTipsEnvVarName: "true",
 	}
-}
-
-// installFromRemoteSource is invoked when we run the installer without providing the associated source files
-// Effectively this will download and unpack the target version and then run the installer packaged for that version
-// To view the source of the target version you can extract the relevant commit ID from the version of the target version
-// This is the default behavior when doing a clean install
-func installFromRemoteSource(out output.Outputer, cfg *config.Instance, an analytics.Dispatcher, args []string, params *Params) error {
-	an.Event(AnalyticsFunnelCat, "remote-source")
-
-	out.Print(output.Title("Installing State Tool Package Manager"))
-	out.Print(`The State Tool lets you install and manage your language runtimes.` + "\n\n" +
-		`ActiveState collects usage statistics and diagnostic data about failures. ` + "\n" +
-		`By using the State Tool Package Manager you agree to the terms of ActiveState’s Privacy Policy, ` + "\n" +
-		`available at: [ACTIONABLE]https://www.activestate.com/company/privacy-policy[/RESET]` + "\n")
-
-	args = append(args, "--from-deferred")
-
-	storeInstallSource(params.sourceInstaller)
-
-	// Fetch payload
-	checker := updater.NewDefaultChecker(cfg)
-	checker.InvocationSource = updater.InvocationSourceInstall // Installing from a remote source is only ever encountered via the install flow
-	checker.VerifyVersion = false
-	update, err := checker.CheckFor(params.branch, params.version)
-	if err != nil {
-		return errs.Wrap(err, "Could not retrieve install package information")
-	}
-	if update == nil {
-		return errs.New("No update information could be found.")
-	}
-
-	version := update.Version
-	if params.branch != "" {
-		version = fmt.Sprintf("%s (%s)", version, params.branch)
-	}
-
-	an.Event(AnalyticsFunnelCat, "download")
-	out.Fprint(os.Stdout, fmt.Sprintf("• Downloading State Tool version [NOTICE]%s[/RESET]... ", version))
-	if _, err := update.DownloadAndUnpack(); err != nil {
-		out.Print("[ERROR]x Failed[/RESET]")
-		return errs.Wrap(err, "Could not download and unpack")
-	}
-	out.Print("[SUCCESS]✔ Done[/RESET]")
-
-	cfg.Set(updater.CfgKeyInstallVersion, params.version)
-
-	an.Event(AnalyticsFunnelCat, "install-async")
-	return update.InstallBlocking(params.path, args...)
 }
 
 // storeInstallSource writes the name of the install client (eg. install.sh) to the appdata dir
@@ -487,4 +429,43 @@ func resolveInstallPath(path string) (string, error) {
 	} else {
 		return installation.DefaultInstallPath()
 	}
+}
+
+func assertCompatibility() error {
+	if sysinfo.OS() == sysinfo.Windows {
+		osv, err := sysinfo.OSVersion()
+		if err != nil {
+			return locale.WrapError(err, "windows_compatibility_warning", "", err.Error())
+		} else if osv.Major < 10 || (osv.Major == 10 && osv.Micro < 17134) {
+			return locale.WrapError(err, "windows_compatibility_error")
+		}
+	}
+
+	return nil
+}
+
+func determineLegacyUpdate(stateToolInstalled bool, packagedStateExe, payloadPath string, params *Params) bool {
+	// Detect whether this is a fresh install or an update
+	var isUpdate bool
+	switch {
+	case (params.sourceInstaller == "install.sh" || params.sourceInstaller == "install.ps1" || noArgs()) && fileutils.FileExists(packagedStateExe):
+		logging.Debug("Not using update flow as installing via " + params.sourceInstaller)
+	case params.force:
+		// When ran with `--force` we always use the install UX
+		logging.Debug("Not using update flow as --force was passed")
+	case payloadPath == "" && fileutils.FileExists(packagedStateExe):
+		// Facilitate older versions of state tool which do not invoke the installer with `--source-path`
+		logging.Debug("Using update flow as installer is alongside payload")
+		isUpdate = true
+	case stateToolInstalled:
+		// This should trigger AFTER the check above where sourcePath is defined
+		logging.Debug("Using update flow as state tool is already installed")
+		isUpdate = true
+	}
+
+	return isUpdate
+}
+
+func noArgs() bool {
+	return len(os.Args[1:]) == 0
 }

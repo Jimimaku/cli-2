@@ -2,28 +2,26 @@ package main
 
 import (
 	"bufio"
+	"context"
 	"errors"
 	"fmt"
 	"os"
 	"os/exec"
-	"runtime"
 	"runtime/debug"
 	"strings"
 	"time"
 
 	"github.com/ActiveState/cli/cmd/state/internal/cmdtree"
 	anAsync "github.com/ActiveState/cli/internal/analytics/client/async"
-	"github.com/ActiveState/cli/internal/appinfo"
 	"github.com/ActiveState/cli/internal/config"
 	"github.com/ActiveState/cli/internal/constants"
 	"github.com/ActiveState/cli/internal/constraints"
-	"github.com/ActiveState/cli/internal/deprecation"
 	"github.com/ActiveState/cli/internal/errs"
 	"github.com/ActiveState/cli/internal/events"
+	"github.com/ActiveState/cli/internal/installation"
 	"github.com/ActiveState/cli/internal/installation/storage"
 	"github.com/ActiveState/cli/internal/locale"
 	"github.com/ActiveState/cli/internal/logging"
-	"github.com/ActiveState/cli/internal/machineid"
 	"github.com/ActiveState/cli/internal/multilog"
 	"github.com/ActiveState/cli/internal/output"
 	"github.com/ActiveState/cli/internal/primer"
@@ -39,12 +37,12 @@ import (
 	"github.com/ActiveState/cli/pkg/platform/model"
 	"github.com/ActiveState/cli/pkg/project"
 	"github.com/ActiveState/cli/pkg/projectfile"
-	"github.com/ActiveState/cli/pkg/sysinfo"
-
 	"golang.org/x/crypto/ssh/terminal"
 )
 
 func main() {
+	startTime := time.Now()
+
 	var exitCode int
 	// Set up logging
 	rollbar.SetupRollbar(constants.StateToolRollbarToken)
@@ -61,20 +59,25 @@ func main() {
 			logging.Warning("Failed waiting for events: %v", err)
 		}
 
-		events.Close("config", cfg.Close)
+		if cfg != nil {
+			events.Close("config", cfg.Close)
+		}
+
+		profile.Measure("main", startTime)
 
 		// exit with exitCode
 		os.Exit(exitCode)
 	}()
 
-	cfg, err := config.New()
+	var err error
+	cfg, err = config.New()
 	if err != nil {
 		multilog.Critical("Could not initialize config: %v", errs.JoinMessage(err))
 		fmt.Fprintf(os.Stderr, "Could not load config, if this problem persists please reinstall the State Tool. Error: %s\n", errs.JoinMessage(err))
 		exitCode = 1
 		return
 	}
-	logging.CurrentHandler().SetConfig(cfg)
+	rollbar.SetConfig(cfg)
 
 	// Set up our output formatter/writer
 	outFlags := parseOutputFlags(os.Args)
@@ -84,19 +87,6 @@ func main() {
 		os.Stderr.WriteString(locale.Tr("err_main_outputer", err.Error()))
 		exitCode = 1
 		return
-	}
-
-	if runtime.GOOS == "windows" {
-		osv, err := sysinfo.OSVersion()
-		if err != nil {
-			logging.Debug("Could not retrieve os version info: %v", err)
-		} else if osv.Major < 10 {
-			out.Notice(output.Heading(locale.Tl("compatibility_warning", "Compatibility Warning")))
-			out.Notice(locale.Tr(
-				"windows_compatibility_warning",
-				constants.ForumsURL,
-			))
-		}
 	}
 
 	// Set up our legacy outputer
@@ -140,20 +130,20 @@ func run(args []string, isInteractive bool, cfg *config.Instance, out output.Out
 		defer cleanup()
 	}
 
-	verbose := os.Getenv("VERBOSE") != "" || argsHaveVerbose(args)
-	logging.CurrentHandler().SetVerbose(verbose)
+	logging.CurrentHandler().SetVerbose(os.Getenv("VERBOSE") != "" || argsHaveVerbose(args))
 
 	logging.Debug("ConfigPath: %s", cfg.ConfigPath())
 	logging.Debug("CachePath: %s", storage.CachePath())
 
-	// set global configuration instances
-	machineid.Configure(cfg)
-	machineid.SetErrorLogger(logging.Error)
+	svcExec, err := installation.ServiceExec()
+	if err != nil {
+		return errs.Wrap(err, "Could not get service info")
+	}
 
 	ipcClient := svcctl.NewDefaultIPCClient()
-	svcPort, err := svcctl.EnsureExecStartedAndLocateHTTP(ipcClient, appinfo.SvcApp().Exec())
+	svcPort, err := svcctl.EnsureExecStartedAndLocateHTTP(ipcClient, svcExec)
 	if err != nil {
-		logging.Error("Failed to start state-svc at state tool invocation, error: %s", errs.JoinMessage(err))
+		return locale.WrapError(err, "start_svc_failed", "Failed to start state-svc at state tool invocation")
 	}
 
 	svcmodel := model.NewSvcModel(svcPort)
@@ -223,17 +213,16 @@ func run(args []string, isInteractive bool, cfg *config.Instance, out output.Out
 		}
 
 		// Check for deprecation
-		deprecated, err := deprecation.Check(cfg)
+		deprecationInfo, err := svcmodel.CheckDeprecation(context.Background())
 		if err != nil {
 			multilog.Error("Could not check for deprecation: %s", err.Error())
 		}
-		if deprecated != nil {
-			date := deprecated.Date.Format(constants.DateFormatUser)
-			if !deprecated.DateReached {
+		if deprecationInfo != nil {
+			if !deprecationInfo.DateReached {
 				out.Notice(output.Heading(locale.Tl("deprecation_title", "Deprecation Warning")))
-				out.Notice(locale.Tr("warn_deprecation", date, deprecated.Reason))
+				out.Notice(locale.Tr("warn_deprecation", deprecationInfo.Date, deprecationInfo.Reason))
 			} else {
-				return locale.NewInputError("err_deprecation", "You are running a version of the State Tool that is no longer supported! Reason: {{.V1}}", date, deprecated.Reason)
+				return locale.NewInputError("err_deprecation", "You are running a version of the State Tool that is no longer supported! Reason: {{.V1}}", deprecationInfo.Date, deprecationInfo.Reason)
 			}
 		}
 
@@ -262,12 +251,20 @@ func run(args []string, isInteractive bool, cfg *config.Instance, out output.Out
 }
 
 func argsHaveVerbose(args []string) bool {
-	for _, arg := range args {
+	var isRunOrExec bool
+	nextArg := 0
+
+	for i, arg := range args {
+		if arg == "run" || arg == "exec" {
+			isRunOrExec = true
+			nextArg = i + 1
+		}
+
 		// Skip looking for verbose args after --, eg. for `state shim -- perl -v`
 		if arg == "--" {
 			return false
 		}
-		if arg == "--verbose" || arg == "-v" {
+		if (arg == "--verbose" || arg == "-v") && (!isRunOrExec || i == nextArg) {
 			return true
 		}
 	}
