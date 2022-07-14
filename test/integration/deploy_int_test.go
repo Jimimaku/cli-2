@@ -465,7 +465,7 @@ func (suite *DeployIntegrationTestSuite) TestDeployUninstall() {
 		suite.True(isEmpty, "Target dir should be empty before we start")
 	}
 
-	suite.InstallAndAssert(ts)
+	suite.InstallAndAssert(ts, targetDir)
 
 	// Uninstall deployed runtime.
 	cp := ts.SpawnWithOpts(
