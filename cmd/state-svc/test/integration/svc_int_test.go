@@ -17,6 +17,7 @@ import (
 	"github.com/ActiveState/cli/internal/svcctl"
 	"github.com/ActiveState/cli/internal/testhelpers/e2e"
 	"github.com/ActiveState/cli/internal/testhelpers/tagsuite"
+	"github.com/ActiveState/termtest"
 	"github.com/shirou/gopsutil/v3/process"
 	"github.com/stretchr/testify/suite"
 )
@@ -88,32 +89,36 @@ func (suite *SvcIntegrationTestSuite) TestSignals() {
 	ts := e2e.New(suite.T(), false)
 	defer ts.Close()
 
+	sockFile := svcctl.NewIPCSockPathFromGlobals().String()
+	suite.T().Log(fileutils.TargetExists(sockFile))
+
+	// TODO: sigint is currently failing locally, sigterm is working locally.
+	var cp *termtest.ConsoleProcess
 	// SIGINT (^C)
-	cp := ts.SpawnCmdWithOpts(ts.SvcExe, e2e.WithArgs("foreground"))
-	cp.Expect("Starting")
-	time.Sleep(1 * time.Second) // wait for the service to start up
+	cp = serviceConsoleProcess(ts)
 	cp.Signal(syscall.SIGINT)
 	cp.Expect("caught a signal: interrupt")
 	cp.ExpectNotExitCode(0)
+	suite.T().Log(fileutils.TargetExists(sockFile))
 
 	cp = ts.SpawnCmdWithOpts(ts.SvcExe, e2e.WithArgs("status"))
 	cp.Expect("Service cannot be reached")
 	cp.ExpectExitCode(1)
+	suite.T().Log(fileutils.TargetExists(sockFile))
 
-	sockFile := svcctl.NewIPCSockPathFromGlobals().String()
 	suite.False(fileutils.TargetExists(sockFile), "socket file was not deleted")
 
 	// SIGTERM
-	cp = ts.SpawnCmdWithOpts(ts.SvcExe, e2e.WithArgs("foreground"))
-	cp.Expect("Starting")
-	time.Sleep(1 * time.Second) // wait for the service to start up
+	cp = serviceConsoleProcess(ts)
 	cp.Signal(syscall.SIGTERM)
 	suite.NotContains(cp.TrimmedSnapshot(), "caught a signal")
 	cp.ExpectExitCode(0) // should exit gracefully
+	suite.T().Log(fileutils.TargetExists(sockFile))
 
 	cp = ts.SpawnCmdWithOpts(ts.SvcExe, e2e.WithArgs("status"))
 	cp.Expect("Service cannot be reached")
 	cp.ExpectExitCode(1)
+	suite.T().Log(fileutils.TargetExists(sockFile))
 
 	suite.False(fileutils.TargetExists(sockFile), "socket file was not deleted")
 }
@@ -203,4 +208,11 @@ func (suite *SvcIntegrationTestSuite) GetNumStateSvcProcesses() int {
 
 func TestSvcIntegrationTestSuite(t *testing.T) {
 	suite.Run(t, new(SvcIntegrationTestSuite))
+}
+
+func serviceConsoleProcess(ts *e2e.Session) *termtest.ConsoleProcess {
+	cp := ts.SpawnCmdWithOpts(ts.SvcExe, e2e.WithArgs("foreground"))
+	cp.Expect("Starting")
+	time.Sleep(3 * time.Second) // wait for the service to start up
+	return cp
 }

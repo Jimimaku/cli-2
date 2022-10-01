@@ -1,0 +1,14 @@
+#! /usr/bin/env bash
+
+xkill() {
+  while pgrep "${1}" > /dev/null; do
+    pkill ${@}
+    sleep 0.333
+  done
+}
+
+xkill state-svc
+state-svc foreground &
+sleep 0.6
+xkill state-svc -INT
+find /tmp/state-ipc -maxdepth 1 -not -type d | [[ "$(wc -l)" -gt "0" ]] && echo >&2 "sock file present"

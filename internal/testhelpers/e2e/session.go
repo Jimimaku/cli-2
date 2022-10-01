@@ -83,12 +83,15 @@ func init() {
 	PersistentPassword = os.Getenv("INTEGRATION_TEST_PASSWORD")
 	PersistentToken = os.Getenv("INTEGRATION_TEST_TOKEN")
 
+	var stopService bool
+
 	// Get username / password from `state secrets` so we can run tests without needing special env setup
 	if PersistentUsername == "" {
 		out, stderr, err := exeutils.ExecSimpleFromDir(environment.GetRootPathUnsafe(), "state", []string{"secrets", "get", "project.INTEGRATION_TEST_USERNAME"}, []string{})
 		if err != nil {
 			fmt.Printf("WARNING!!! Could not retrieve username via state secrets: %v, stdout/stderr: %v\n%v\n", err, out, stderr)
 		}
+		stopService = true
 		PersistentUsername = strings.TrimSpace(out)
 	}
 	if PersistentPassword == "" {
@@ -96,6 +99,7 @@ func init() {
 		if err != nil {
 			fmt.Printf("WARNING!!! Could not retrieve password via state secrets: %v, stdout/stderr: %v\n%v\n", err, out, stderr)
 		}
+		stopService = true
 		PersistentPassword = strings.TrimSpace(out)
 	}
 	if PersistentToken == "" {
@@ -103,6 +107,7 @@ func init() {
 		if err != nil {
 			fmt.Printf("WARNING!!! Could not retrieve token via state secrets: %v, stdout/stderr: %v\n%v\n", err, out, stderr)
 		}
+		stopService = true
 		PersistentToken = strings.TrimSpace(out)
 	}
 
@@ -110,6 +115,12 @@ func init() {
 		fmt.Println("WARNING!!! Environment variables INTEGRATION_TEST_USERNAME, INTEGRATION_TEST_PASSWORD INTEGRATION_TEST_TOKEN and should be defined!")
 	}
 
+	if stopService {
+		out, stderr, err := exeutils.ExecSimpleFromDir(environment.GetRootPathUnsafe(), "state-svc", []string{"stop"}, []string{})
+		if err != nil {
+			fmt.Printf("WARNING!!! Could not stop service: %v, stdout/stderr: %v\n%v\n", err, out, stderr)
+		}
+	}
 }
 
 // ExecutablePath returns the path to the state tool that we want to test
