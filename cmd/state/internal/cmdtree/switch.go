@@ -31,6 +31,6 @@ func newSwitchCommand(prime *primer.Values) *captain.Command {
 		})
 
 	cmd.SetGroup(EnvironmentSetupGroup)
-	cmd.SetUnstable(true)
+	cmd.SetSupportsStructuredOutput()
 	return cmd
 }

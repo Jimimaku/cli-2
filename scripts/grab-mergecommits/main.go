@@ -1,6 +1,7 @@
 package main
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -8,7 +9,7 @@ import (
 	"time"
 
 	"github.com/ActiveState/cli/internal/errs"
-	"github.com/ActiveState/cli/internal/exeutils"
+	"github.com/ActiveState/cli/internal/osutils"
 	"github.com/ActiveState/cli/internal/sliceutils"
 	wh "github.com/ActiveState/cli/scripts/internal/workflow-helpers"
 	"github.com/thoas/go-funk"
@@ -95,8 +96,9 @@ func orderCommits(hashes []string) []string {
 	for _, hash := range hashes {
 		handled := false
 		for oidx, ohash := range ordered {
-			code, _, err := exeutils.Execute("git", []string{"merge-base", "--is-ancestor", hash, ohash}, nil)
-			if err != nil && !errs.Matches(err, &exec.ExitError{}) {
+			code, _, err := osutils.Execute("git", []string{"merge-base", "--is-ancestor", hash, ohash}, nil)
+			var errExit *exec.ExitError
+			if err != nil && !errors.As(err, &errExit) {
 				panic(err)
 			}
 			if code == 0 {

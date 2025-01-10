@@ -106,7 +106,6 @@ func (v *SubShell) WriteCompletionScript(completionScript string) error {
 	}
 
 	fpath := filepath.Join(dir, constants.CommandName)
-	logging.Debug("Writing to %s: %s", fpath, completionScript)
 	err := fileutils.WriteFile(fpath, []byte(completionScript))
 	if err != nil {
 		logging.Debug("Could not write completions script '%s', likely due to non-admin privileges", fpath)
@@ -134,9 +133,9 @@ func (v *SubShell) EnsureRcFileExists() error {
 }
 
 // SetupShellRcFile - subshell.SubShell
-func (v *SubShell) SetupShellRcFile(targetDir string, env map[string]string, namespace *project.Namespaced) error {
+func (v *SubShell) SetupShellRcFile(targetDir string, env map[string]string, namespace *project.Namespaced, cfg sscommon.Configurable) error {
 	env = sscommon.EscapeEnv(env)
-	return sscommon.SetupShellRcFile(filepath.Join(targetDir, "shell.sh"), "bashrc_global.sh", env, namespace)
+	return sscommon.SetupShellRcFile(filepath.Join(targetDir, "shell.sh"), "bashrc_global.sh", env, namespace, cfg)
 }
 
 // SetEnv - see subshell.SetEnv

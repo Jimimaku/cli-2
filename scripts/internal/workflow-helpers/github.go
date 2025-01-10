@@ -7,9 +7,10 @@ import (
 	"strings"
 	"time"
 
+	"github.com/ActiveState/cli/internal/constants"
 	"github.com/ActiveState/cli/internal/errs"
 	"github.com/ActiveState/cli/internal/logging"
-	"github.com/ActiveState/cli/internal/rtutils/p"
+	"github.com/ActiveState/cli/internal/rtutils/ptr"
 	"github.com/ActiveState/cli/internal/testhelpers/secrethelper"
 	"github.com/andygrunwald/go-jira"
 	"github.com/blang/semver"
@@ -147,21 +148,14 @@ func SearchGithubIssues(client *github.Client, term string) ([]*github.Issue, er
 }
 
 func FetchPRByTitle(ghClient *github.Client, title string) (*github.PullRequest, error) {
-	// Strip out words containing illegal characters. This'll mean we get more results than we want, but it's still
-	// faster than iterating over ALL prs
-	searchTerm := sanitizeSearchTerm(title)
-	if searchTerm == "" {
-		return nil, errs.New("All title words contain illegal characters, so no search could be performed")
-	}
-
 	var targetIssue *github.Issue
-	issues, _, err := ghClient.Search.Issues(context.Background(), fmt.Sprintf("repo:ActiveState/cli in:title is:pr %s", searchTerm), nil)
+	issues, _, err := ghClient.Search.Issues(context.Background(), fmt.Sprintf("repo:ActiveState/cli in:title is:pr %s", title), nil)
 	if err != nil {
 		return nil, errs.Wrap(err, "failed to search for issues")
 	}
 
 	for _, issue := range issues.Issues {
-		if issue.GetTitle() == title {
+		if strings.TrimSpace(issue.GetTitle()) == strings.TrimSpace(title) {
 			targetIssue = issue
 			break
 		}
@@ -190,8 +184,8 @@ func CreatePR(ghClient *github.Client, prName, branchName, baseBranch, body stri
 	payload := &github.NewPullRequest{
 		Title: &prName,
 		Head:  &branchName,
-		Base:  p.StrP(baseBranch),
-		Body:  p.StrP(body),
+		Base:  ptr.To(baseBranch),
+		Body:  ptr.To(body),
 	}
 
 	pr, _, err := ghClient.PullRequests.Create(context.Background(), "ActiveState", "cli", payload)
@@ -319,13 +313,41 @@ func ActiveVersionsOnBranch(ghClient *github.Client, jiraClient *jira.Client, br
 func UpdatePRTargetBranch(client *github.Client, prnumber int, targetBranch string) error {
 	_, _, err := client.PullRequests.Edit(context.Background(), "ActiveState", "cli", prnumber, &github.PullRequest{
 		Base: &github.PullRequestBranch{
-			Ref: github.String(fmt.Sprintf("refs/heads/%s", targetBranch)),
+			Ref: github.String(targetBranch),
 		},
 	})
 	if err != nil {
 		return errs.Wrap(err, "failed to update PR target branch")
 	}
 	return nil
+}
+
+func GetCommitsBehind(client *github.Client, base, head string) ([]*github.RepositoryCommit, error) {
+	// Note we're swapping base and head when doing this because github responds with the commits that are ahead, rather than behind.
+	commits, _, err := client.Repositories.CompareCommits(context.Background(), "ActiveState", "cli", head, base, nil)
+	if err != nil {
+		return nil, errs.Wrap(err, "failed to compare commits")
+	}
+	result := []*github.RepositoryCommit{}
+	for _, commit := range commits.Commits {
+		msg := strings.Split(commit.GetCommit().GetMessage(), "\n")[0] // first line only
+		msgWords := strings.Split(msg, " ")
+		if msg == UpdateVersionCommitMessage {
+			// Updates to version.txt are not meant to be inherited
+			continue
+		}
+		suffix := strings.TrimPrefix(msgWords[len(msgWords)-1], "ActiveState/")
+		if (strings.HasPrefix(msg, "Merge pull request") && IsVersionBranch(suffix)) ||
+			(strings.HasPrefix(msg, "Merge branch '"+constants.BetaChannel+"'") && IsVersionBranch(suffix)) {
+			// Git's compare commits is not smart enough to consider merge commits from other version branches equal
+			// This matches the following types of messages:
+			// Merge pull request #2531 from ActiveState/version/0-38-1-RC1
+			// Merge branch 'beta' into version/0-40-0-RC1
+			continue
+		}
+		result = append(result, commit)
+	}
+	return result, nil
 }
 
 func SetPRBody(client *github.Client, prnumber int, body string) error {
@@ -342,7 +364,7 @@ func CreateBranch(ghClient *github.Client, branchName string, SHA string) error 
 	_, _, err := ghClient.Git.CreateRef(context.Background(), "ActiveState", "cli", &github.Reference{
 		Ref: github.String(fmt.Sprintf("refs/heads/%s", branchName)),
 		Object: &github.GitObject{
-			SHA: p.StrP(SHA),
+			SHA: ptr.To(SHA),
 		},
 	})
 	if err != nil {
@@ -351,7 +373,7 @@ func CreateBranch(ghClient *github.Client, branchName string, SHA string) error 
 	return nil
 }
 
-func CreateFileUpdateCommit(ghClient *github.Client, branchName string, path string, contents string) (string, error) {
+func CreateFileUpdateCommit(ghClient *github.Client, branchName string, path string, contents string, message string) (string, error) {
 	fileContents, _, _, err := ghClient.Repositories.GetContents(context.Background(), "ActiveState", "cli", path, &github.RepositoryContentGetOptions{
 		Ref: branchName,
 	})
@@ -361,11 +383,11 @@ func CreateFileUpdateCommit(ghClient *github.Client, branchName string, path str
 
 	resp, _, err := ghClient.Repositories.UpdateFile(context.Background(), "ActiveState", "cli", path, &github.RepositoryContentFileOptions{
 		Author: &github.CommitAuthor{
-			Name:  p.StrP("ActiveState CLI Automation"),
-			Email: p.StrP("support@activestate.com"),
+			Name:  ptr.To("ActiveState CLI Automation"),
+			Email: ptr.To("support@activestate.com"),
 		},
 		Branch:  &branchName,
-		Message: p.StrP(fmt.Sprintf("Update %s", path)),
+		Message: ptr.To(message),
 		Content: []byte(contents),
 		SHA:     fileContents.SHA,
 	})
@@ -374,28 +396,4 @@ func CreateFileUpdateCommit(ghClient *github.Client, branchName string, path str
 	}
 
 	return resp.GetSHA(), nil
-}
-
-// sannitizeSearchTerm strips words containing illegal characters from the search term
-// https://docs.github.com/en/search-github/searching-on-github/searching-code#considerations-for-code-search
-func sanitizeSearchTerm(term string) string {
-	illegal := strings.Split(". , : ; / \\ ` ' \" = * ! ? # $ & + ^ | ~ < > ( ) { } [ ] @", " ")
-	var result string
-	skip := false
-	lastSpace := 0
-	for x := 0; x < len(term); x++ {
-		char := string(term[x])
-		if char == " " {
-			lastSpace = len(result)
-			skip = false
-		} else if funk.Contains(illegal, char) {
-			skip = true
-			result = result[0:lastSpace]
-		}
-		if skip {
-			continue
-		}
-		result += char
-	}
-	return strings.TrimSpace(result)
 }

@@ -16,6 +16,8 @@ const (
 	ReleaseBranch = "release"
 )
 
+const UpdateVersionCommitMessage = "Update version.txt"
+
 const VersionNextFeasible = "Next Feasible"
 const VersionNextUnscheduled = "Next Unscheduled"
 
@@ -39,10 +41,7 @@ func VersionFromPRTitle(title string) (semver.Version, error) {
 const versionBranchPrefix = "version/"
 
 func IsVersionBranch(branchName string) bool {
-	if strings.HasPrefix(branchName, versionBranchPrefix) {
-		return true
-	}
-	return false
+	return strings.HasPrefix(branchName, versionBranchPrefix)
 }
 
 func ValidVersionBranch(branchName string, version semver.Version) error {

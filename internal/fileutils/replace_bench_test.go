@@ -3,7 +3,6 @@ package fileutils
 import (
 	"bufio"
 	"io"
-	"io/ioutil"
 	"math/rand"
 	"os"
 	"testing"
@@ -40,7 +39,7 @@ func BenchmarkRead(b *testing.B) {
 	newPath := "def/ghi"
 	byts := setup(oldPath, newPath, "/bin/python.sh", true)
 
-	testFile := TempFileUnsafe()
+	testFile := TempFileUnsafe("", "")
 	_, err := testFile.Write(byts)
 	if err != nil {
 		b.Errorf("failed to write test file: %v", err)
@@ -62,7 +61,7 @@ func BenchmarkRead(b *testing.B) {
 			defer func() {
 				f.Close()
 			}()
-			r, err := ioutil.ReadAll(f)
+			r, err := io.ReadAll(f)
 			if err != nil {
 				bb.Errorf("Received error reading: %v", err)
 			}
@@ -138,7 +137,7 @@ func BenchmarkWrite(b *testing.B) {
 	b.ResetTimer()
 
 	for n := 0; n < b.N; n++ {
-		f := TempFileUnsafe()
+		f := TempFileUnsafe("", "")
 		defer func() {
 			f.Close()
 			os.Remove(f.Name())

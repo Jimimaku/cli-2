@@ -14,7 +14,7 @@ import (
 	"github.com/ActiveState/cli/internal/osutils"
 	"github.com/ActiveState/cli/internal/output"
 	"github.com/ActiveState/cli/internal/rollbar"
-	"github.com/ActiveState/cli/internal/rtutils/p"
+	"github.com/ActiveState/cli/internal/rtutils/ptr"
 	"github.com/ActiveState/cli/internal/singleton/uniqid"
 	"github.com/ActiveState/cli/pkg/platform/authentication"
 	"github.com/ActiveState/cli/pkg/sysinfo"
@@ -22,7 +22,7 @@ import (
 
 type Values struct {
 	Version          *string
-	BranchName       *string
+	ChannelName      *string
 	UserID           *string
 	OSName           *string
 	OSVersion        *string
@@ -40,20 +40,26 @@ type Values struct {
 	CommitID         *string
 	Command          *string
 	Sequence         *int
+	TargetVersion    *string
+	Error            *string
+	Message          *string
+	CI               *bool
+	Interactive      *bool
+	ActiveStateCI    *bool
 
 	preProcessor func(*Values) error
 }
 
-func NewDefaultDimensions(pjNamespace, sessionToken, updateTag string) *Values {
+func NewDefaultDimensions(pjNamespace, sessionToken, updateTag string, auth *authentication.Auth) *Values {
 	installSource, err := storage.InstallSource()
 	if err != nil {
-		multilog.Error("Could not detect installSource: %s", errs.Join(err, " :: ").Error())
+		multilog.Error("Could not detect installSource: %s", errs.JoinMessage(err))
 	}
 
 	deviceID := uniqid.Text()
 
 	var userIDString string
-	userID := authentication.LegacyGet().UserID()
+	userID := auth.UserID()
 	if userID != nil {
 		userIDString = userID.String()
 	}
@@ -69,50 +75,62 @@ func NewDefaultDimensions(pjNamespace, sessionToken, updateTag string) *Values {
 	}
 
 	return &Values{
-		p.StrP(constants.Version),
-		p.StrP(constants.BranchName),
-		p.StrP(userIDString),
-		p.StrP(osName),
-		p.StrP(osVersion),
-		p.StrP(installSource),
-		p.StrP(deviceID),
-		p.StrP(sessionToken),
-		p.StrP(updateTag),
-		p.StrP(pjNamespace),
-		p.StrP(string(output.PlainFormatName)),
-		p.StrP(""),
-		p.StrP(CalculateFlags()),
-		p.StrP(""),
-		p.StrP(""),
-		p.StrP(instanceid.ID()),
-		p.StrP(""),
-		p.StrP(osutils.ExecutableName()),
-		p.IntP(0),
+		ptr.To(constants.Version),
+		ptr.To(constants.ChannelName),
+		ptr.To(userIDString),
+		ptr.To(osName),
+		ptr.To(osVersion),
+		ptr.To(installSource),
+		ptr.To(deviceID),
+		ptr.To(sessionToken),
+		ptr.To(updateTag),
+		ptr.To(pjNamespace),
+		ptr.To(string(output.PlainFormatName)),
+		ptr.To(""),
+		ptr.To(CalculateFlags()),
+		ptr.To(""),
+		ptr.To(""),
+		ptr.To(instanceid.ID()),
+		ptr.To(""),
+		ptr.To(osutils.ExecutableName()),
+		ptr.To(0),
+		ptr.To(""),
+		ptr.To(""),
+		ptr.To(""),
+		ptr.To(false),
+		ptr.To(false),
+		ptr.To(false),
 		nil,
 	}
 }
 
 func (v *Values) Clone() *Values {
 	return &Values{
-		Version:          p.PstrP(v.Version),
-		BranchName:       p.PstrP(v.BranchName),
-		UserID:           p.PstrP(v.UserID),
-		OSName:           p.PstrP(v.OSName),
-		OSVersion:        p.PstrP(v.OSVersion),
-		InstallSource:    p.PstrP(v.InstallSource),
-		UniqID:           p.PstrP(v.UniqID),
-		SessionToken:     p.PstrP(v.SessionToken),
-		UpdateTag:        p.PstrP(v.UpdateTag),
-		ProjectNameSpace: p.PstrP(v.ProjectNameSpace),
-		OutputType:       p.PstrP(v.OutputType),
-		ProjectID:        p.PstrP(v.ProjectID),
-		Flags:            p.PstrP(v.Flags),
-		Trigger:          p.PstrP(v.Trigger),
-		Headless:         p.PstrP(v.Headless),
-		InstanceID:       p.PstrP(v.InstanceID),
-		CommitID:         p.PstrP(v.CommitID),
-		Command:          p.PstrP(v.Command),
-		Sequence:         p.PintP(v.Sequence),
+		Version:          ptr.Clone(v.Version),
+		ChannelName:      ptr.Clone(v.ChannelName),
+		UserID:           ptr.Clone(v.UserID),
+		OSName:           ptr.Clone(v.OSName),
+		OSVersion:        ptr.Clone(v.OSVersion),
+		InstallSource:    ptr.Clone(v.InstallSource),
+		UniqID:           ptr.Clone(v.UniqID),
+		SessionToken:     ptr.Clone(v.SessionToken),
+		UpdateTag:        ptr.Clone(v.UpdateTag),
+		ProjectNameSpace: ptr.Clone(v.ProjectNameSpace),
+		OutputType:       ptr.Clone(v.OutputType),
+		ProjectID:        ptr.Clone(v.ProjectID),
+		Flags:            ptr.Clone(v.Flags),
+		Trigger:          ptr.Clone(v.Trigger),
+		Headless:         ptr.Clone(v.Headless),
+		InstanceID:       ptr.Clone(v.InstanceID),
+		CommitID:         ptr.Clone(v.CommitID),
+		Command:          ptr.Clone(v.Command),
+		Sequence:         ptr.Clone(v.Sequence),
+		TargetVersion:    ptr.Clone(v.TargetVersion),
+		Error:            ptr.Clone(v.Error),
+		Message:          ptr.Clone(v.Message),
+		CI:               ptr.Clone(v.CI),
+		Interactive:      ptr.Clone(v.Interactive),
+		ActiveStateCI:    ptr.Clone(v.ActiveStateCI),
 		preProcessor:     v.preProcessor,
 	}
 }
@@ -124,8 +142,8 @@ func (m *Values) Merge(mergeWith ...*Values) {
 		if dim.Version != nil {
 			m.Version = dim.Version
 		}
-		if dim.BranchName != nil {
-			m.BranchName = dim.BranchName
+		if dim.ChannelName != nil {
+			m.ChannelName = dim.ChannelName
 		}
 		if dim.UserID != nil {
 			m.UserID = dim.UserID
@@ -178,6 +196,24 @@ func (m *Values) Merge(mergeWith ...*Values) {
 		if dim.Sequence != nil {
 			m.Sequence = dim.Sequence
 		}
+		if dim.TargetVersion != nil {
+			m.TargetVersion = dim.TargetVersion
+		}
+		if dim.Error != nil {
+			m.Error = dim.Error
+		}
+		if dim.Message != nil {
+			m.Message = dim.Message
+		}
+		if dim.CI != nil {
+			m.CI = dim.CI
+		}
+		if dim.Interactive != nil {
+			m.Interactive = dim.Interactive
+		}
+		if dim.ActiveStateCI != nil {
+			m.ActiveStateCI = dim.ActiveStateCI
+		}
 		if dim.preProcessor != nil {
 			m.preProcessor = dim.preProcessor
 		}
@@ -195,7 +231,7 @@ func (v *Values) PreProcess() error {
 		}
 	}
 
-	if p.PStr(v.UniqID) == "" {
+	if ptr.From(v.UniqID, "") == "" {
 		return errs.New("device id is unset when creating analytics event")
 	}
 

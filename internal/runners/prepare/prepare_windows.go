@@ -6,20 +6,20 @@ import (
 	"os/user"
 	"path/filepath"
 
+	svcApp "github.com/ActiveState/cli/cmd/state-svc/app"
 	svcAutostart "github.com/ActiveState/cli/cmd/state-svc/autostart"
-
-	"github.com/ActiveState/cli/internal/assets"
-	"github.com/ActiveState/cli/internal/constants"
+	"github.com/ActiveState/cli/internal/errs"
 	"github.com/ActiveState/cli/internal/fileutils"
-	"github.com/ActiveState/cli/internal/installation"
 	"github.com/ActiveState/cli/internal/locale"
 	"github.com/ActiveState/cli/internal/multilog"
 	"github.com/ActiveState/cli/internal/osutils"
 	"github.com/ActiveState/cli/internal/osutils/autostart"
 	"github.com/ActiveState/cli/internal/osutils/shortcut"
+	userhome "github.com/ActiveState/cli/internal/osutils/user"
 )
 
-var shortcutDir = filepath.Join(os.Getenv("USERPROFILE"), "AppData", "Roaming", "Microsoft", "Windows", "Start Menu", "Programs", "ActiveState")
+// shortcutPathRelative is relative to USERHOME
+var shortcutPathRelative = filepath.Join("AppData", "Roaming", "Microsoft", "Windows", "Start Menu", "Programs", "ActiveState")
 
 func (r *Prepare) prepareOS() error {
 	err := setStateProtocol()
@@ -28,55 +28,34 @@ func (r *Prepare) prepareOS() error {
 	}
 
 	if err := r.prepareStartShortcut(); err != nil {
-		r.reportError(locale.Tl("err_prepare_shortcut", "Could not create start menu shortcut, error received: {{.V0}}.", err.Error()), err)
+		r.reportError(locale.Tl("err_prepare_shortcut", "Could not create start menu shortcut. Error received: {{.V0}}.", err.Error()), err)
 	}
 
-	svcExec, err := installation.ServiceExec()
+	a, err := svcApp.New()
 	if err != nil {
-		r.reportError(locale.Tl("err_prepare_svc_exec", "Could not get service exec, error recieved: {{.V0}}", err.Error()), err)
+		return locale.WrapError(err, "err_autostart_app")
 	}
 
-	if svcExec != "" {
-		as, err := autostart.New(svcAutostart.App, svcExec, []string{"start"}, svcAutostart.Options, r.cfg)
-		if err != nil {
-			return locale.WrapError(err, "err_autostart_app")
-		}
-
-		if err := as.Enable(); err != nil {
-			r.reportError(locale.Tl("err_prepare_service_autostart", "Could not setup service autostart, error recieved: {{.V0}}", err.Error()), err)
-		}
+	if err = autostart.Enable(a.Path(), svcAutostart.Options); err != nil {
+		r.reportError(locale.Tl("err_prepare_service_autostart", "Could not setup service autostart. Error recieved: {{.V0}}", err.Error()), err)
 	}
 
 	return nil
 }
 
 func (r *Prepare) prepareStartShortcut() error {
+	home, err := userhome.HomeDir()
+	if err != nil {
+		return errs.Wrap(err, "Unable to get home directory")
+	}
+
+	shortcutDir := filepath.Join(home, shortcutPathRelative)
+
 	if err := fileutils.MkdirUnlessExists(shortcutDir); err != nil {
 		return locale.WrapInputError(err, "err_preparestart_mkdir", "Could not create start menu entry: %s", shortcutDir)
 	}
 
-	trayExec, err := installation.TrayExec()
-	if err != nil {
-		return locale.WrapError(err, "err_tray_exec")
-	}
-
-	sc := shortcut.New(shortcutDir, constants.TrayAppName, trayExec)
-
-	err = sc.Enable()
-	if err != nil {
-		return locale.WrapError(err, "err_preparestart_shortcut", "", sc.Path())
-	}
-
-	icon, err := assets.ReadFileBytes("icon.ico")
-	if err != nil {
-		return err
-	}
-	err = sc.SetIconBlob(icon)
-	if err != nil {
-		return locale.WrapError(err, "err_preparestart_icon", "", sc.Path())
-	}
-
-	sc = shortcut.New(shortcutDir, "Uninstall State Tool", r.subshell.Binary(), "/C \"state clean uninstall\"")
+	sc := shortcut.New(shortcutDir, "Uninstall State Tool", r.subshell.Binary(), "/C \"state clean uninstall --prompt\"")
 	err = sc.Enable()
 	if err != nil {
 		return locale.WrapError(err, "err_preparestart_shortcut", "", sc.Path())
@@ -89,8 +68,6 @@ const (
 	protocolKey        = `SOFTWARE\Classes\state`
 	protocolCommandKey = `SOFTWARE\Classes\state\shell\open\command`
 )
-
-type createKeyFunc = func(path string) (osutils.RegistryKey, bool, error)
 
 func setStateProtocol() error {
 	isAdmin, err := osutils.IsAdmin()
@@ -134,7 +111,7 @@ func setStateProtocol() error {
 		return locale.WrapError(err, "err_prepare_executable", "Could not get current executable")
 	}
 
-	err = commandKey.SetStringValue("", fmt.Sprintf(`cmd /k "%s _protocol %%1"`, exe))
+	err = commandKey.SetStringValue("", fmt.Sprintf(`%s _protocol %%1`, exe))
 	if err != nil {
 		return locale.WrapError(err, "err_prepare_command_set", "Could not set command value in registry")
 	}
@@ -142,20 +119,16 @@ func setStateProtocol() error {
 	return nil
 }
 
-func installedPreparedFiles(cfg autostart.Configurable) ([]string, error) {
-	var files []string
-
-	trayExec, err := installation.TrayExec()
+func extraInstalledPreparedFiles() []string {
+	home, err := userhome.HomeDir()
 	if err != nil {
-		return nil, locale.WrapError(err, "err_tray_exec")
+		multilog.Error("Unable to get home directory: %v", err)
+		return nil
 	}
 
-	sc := shortcut.New(shortcutDir, constants.TrayAppName, trayExec)
-	files = append(files, filepath.Dir(sc.Path()))
-
-	return files, nil
+	return []string{filepath.Join(home, shortcutPathRelative)}
 }
 
-func cleanOS(cfg autostart.Configurable) error {
+func cleanOS() error {
 	return nil
 }

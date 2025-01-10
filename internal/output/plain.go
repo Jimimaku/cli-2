@@ -10,7 +10,6 @@ import (
 	"strings"
 
 	"github.com/ActiveState/cli/internal/colorize"
-	"github.com/ActiveState/cli/internal/fileutils"
 	"github.com/ActiveState/cli/internal/locale"
 	"github.com/ActiveState/cli/internal/logging"
 	"github.com/ActiveState/cli/internal/multilog"
@@ -36,9 +35,13 @@ const (
 	HidePlain PlainOpts = "hidePlain"
 	// ShiftColsPrefix starts the column after the set qty
 	ShiftColsPrefix PlainOpts = "shiftCols="
+	// OmitEmpty omits empty values from output
+	OmitEmpty PlainOpts = "omitEmpty"
+	// HideDash hides the dash in table output
+	HideDash PlainOpts = "hideDash"
+	// OmitKey hides the current struct key from output, its value is still printed
+	OmitKey PlainOpts = "omitKey"
 )
-
-const dash = "\u2500"
 
 // Plain is our plain outputer, it uses reflect to marshal the data.
 // Semantic highlighting tags are supported as [NOTICE]foo[/RESET]
@@ -88,7 +91,7 @@ func (f *Plain) Config() *Config {
 
 // write is a little helper that just takes care of marshalling the value and sending it to the requested writer
 func (f *Plain) write(writer io.Writer, value interface{}) {
-	v, err := sprint(value)
+	v, err := sprint(value, nil)
 	if err != nil {
 		multilog.Log(logging.ErrorNoStacktrace, rollbar.Error)("Could not sprint value: %v, error: %v, stack: %s", value, err, stacktrace.Get().String())
 		f.writeNow(f.cfg.ErrWriter, fmt.Sprintf("[ERROR]%s[/RESET]", locale.Tr("err_sprint", err.Error())))
@@ -99,26 +102,19 @@ func (f *Plain) write(writer io.Writer, value interface{}) {
 
 // writeNow is a little helper that just writes the given value to the requested writer (no marshalling)
 func (f *Plain) writeNow(writer io.Writer, value string) {
-	_, err := colorize.Colorize(wordWrap(value), writer, !f.cfg.Colored)
-	if err != nil {
-		logging.ErrorNoStacktrace("Writing colored output failed: %v", err)
+	if f.Config().Interactive {
+		value = colorize.Wrap(value, termutils.GetWidth(), true, "").String()
 	}
-}
-
-func wordWrap(text string) string {
-	return wordWrapWithWidth(text, termutils.GetWidth())
-}
-
-func wordWrapWithWidth(text string, width int) string {
-	return colorize.GetCroppedText(text, width, true).String()
+	_, err := colorize.Colorize(value, writer, !f.cfg.Colored)
+	if err != nil {
+		logging.Warning("Writing colored output failed: %v", err)
+	}
 }
 
 const nilText = "<nil>"
 
-var byteType = reflect.TypeOf([]byte(nil))
-
 // sprint will marshal and return the given value as a string
-func sprint(value interface{}) (string, error) {
+func sprint(value interface{}, opts []string) (string, error) {
 	if value == nil {
 		return nilText, nil
 	}
@@ -138,7 +134,7 @@ func sprint(value interface{}) (string, error) {
 		if valueRfl.IsNil() {
 			return nilText, nil
 		}
-		return sprint(valueRfl.Elem().Interface())
+		return sprint(valueRfl.Elem().Interface(), opts)
 
 	case reflect.Struct:
 		return sprintStruct(value)
@@ -147,13 +143,13 @@ func sprint(value interface{}) (string, error) {
 		if valueRfl.IsNil() {
 			return nilText, nil
 		}
-		return sprintSlice(value)
+		return sprintSlice(value, opts)
 
 	case reflect.Map:
 		if valueRfl.IsNil() {
 			return nilText, nil
 		}
-		return sprintMap(value)
+		return sprintMap(value, opts)
 
 	case reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64,
 		reflect.Uint, reflect.Uint8, reflect.Uint16, reflect.Uint32, reflect.Uint64:
@@ -190,14 +186,19 @@ func sprintStruct(value interface{}) (string, error) {
 			if err != nil {
 				return "", err
 			}
-			return sprintTable(true, slice)
+			return sprintTable(true, false, slice)
 		}
 
-		stringValue, err := sprint(field.value)
+		stringValue, err := sprint(field.value, field.opts)
 		if err != nil {
 			return "", err
 		}
 		if stringValue == nilText {
+			continue
+		}
+
+		if funk.Contains(field.opts, string(OmitKey)) {
+			result = append(result, stringValue)
 			continue
 		}
 
@@ -213,25 +214,25 @@ func sprintStruct(value interface{}) (string, error) {
 }
 
 // sprintSlice will marshal and return the given slice as a string
-func sprintSlice(value interface{}) (string, error) {
+func sprintSlice(value interface{}, opts []string) (string, error) {
 	slice, err := parseSlice(value)
 	if err != nil {
 		return "", err
 	}
 
 	if len(slice) > 0 && isStruct(slice[0]) {
-		return sprintTable(false, slice)
+		return sprintTable(false, funk.Contains(opts, string(HideDash)), slice)
 	}
 
 	result := []string{}
 	for _, v := range slice {
-		stringValue, err := sprint(v)
+		stringValue, err := sprint(v, opts)
 		if err != nil {
 			return "", err
 		}
 
 		// prepend if stringValue does not represent a slice
-		if !isSlice(v) {
+		if !isSlice(v) && !funk.Contains(opts, string(HideDash)) {
 			stringValue = " - " + stringValue
 		}
 
@@ -242,7 +243,7 @@ func sprintSlice(value interface{}) (string, error) {
 }
 
 // sprintMap will marshal and return the given map as a string
-func sprintMap(value interface{}) (string, error) {
+func sprintMap(value interface{}, opts []string) (string, error) {
 	mp, err := parseMap(value)
 	if err != nil {
 		return "", err
@@ -250,7 +251,7 @@ func sprintMap(value interface{}) (string, error) {
 
 	result := []string{}
 	for k, v := range mp {
-		stringValue, err := sprint(v)
+		stringValue, err := sprint(v, opts)
 		if err != nil {
 			return "", err
 		}
@@ -268,9 +269,13 @@ func sprintMap(value interface{}) (string, error) {
 }
 
 // sprintTable will marshal and return the given slice of structs as a string, formatted as a table
-func sprintTable(vertical bool, slice []interface{}) (string, error) {
+func sprintTable(vertical, hideDash bool, slice []interface{}) (string, error) {
 	if len(slice) == 0 {
 		return "", nil
+	}
+
+	if vertical {
+		return sprintVerticalTable(slice)
 	}
 
 	headers := []string{}
@@ -292,13 +297,17 @@ func sprintTable(vertical bool, slice []interface{}) (string, error) {
 				continue
 			}
 
-			if firstIteration && !funk.Contains(field.opts, string(SeparateLineOpt)) {
-				headers = append(headers, localizedField(field.l10n))
-			}
-
-			stringValue, err := sprint(field.value)
+			stringValue, err := sprint(field.value, field.opts)
 			if err != nil {
 				return "", err
+			}
+
+			if funk.Contains(field.opts, string(OmitEmpty)) && (stringValue == "" || stringValue == nilText) {
+				continue
+			}
+
+			if firstIteration && !funk.Contains(field.opts, string(SeparateLineOpt)) {
+				headers = append(headers, localizedField(field.l10n))
 			}
 
 			if funk.Contains(field.opts, string(EmptyNil)) && stringValue == nilText {
@@ -324,14 +333,63 @@ func sprintTable(vertical bool, slice []interface{}) (string, error) {
 		}
 	}
 
-	if vertical {
-		t := table.New([]string{"", ""})
-		t.AddRow(verticalRows(headers, rows)...)
-		t.HideHeaders = true
-		return t.Render(), nil
+	table := table.New(headers)
+	if hideDash {
+		table.HideDash = true
 	}
 
-	return table.New(headers).AddRow(rows...).Render(), nil
+	return table.AddRow(rows...).Render(), nil
+}
+
+type verticalRow struct {
+	header  string
+	content string
+}
+
+func sprintVerticalTable(slice []interface{}) (string, error) {
+	if len(slice) == 0 {
+		return "", nil
+	}
+
+	rows := [][]verticalRow{}
+	for _, v := range slice {
+		meta, err := parseStructMeta(v)
+		if err != nil {
+			return "", err
+		}
+
+		row := []verticalRow{}
+		for _, field := range meta {
+			if funk.Contains(field.opts, string(HidePlain)) {
+				continue
+			}
+
+			stringValue, err := sprint(field.value, field.opts)
+			if err != nil {
+				return "", err
+			}
+
+			if funk.Contains(field.opts, string(OmitEmpty)) && (stringValue == "" || stringValue == nilText) {
+				continue
+			}
+
+			if funk.Contains(field.opts, string(EmptyNil)) && stringValue == nilText {
+				stringValue = ""
+			}
+
+			row = append(row, verticalRow{header: localizedField(field.l10n), content: stringValue})
+		}
+
+		if len(row) > 0 {
+			rows = append(rows, row)
+		}
+	}
+
+	t := table.New([]string{"", ""})
+	t.AddRow(verticalRows(rows)...)
+	t.HideHeaders = true
+	t.Vertical = true
+	return t.Render(), nil
 }
 
 func asSlice(val interface{}) ([]interface{}, error) {
@@ -356,14 +414,6 @@ func localizedField(input string) string {
 		out = in[1]
 	}
 	return out
-}
-
-func trimValue(value string, size int) string {
-	value = strings.Replace(value, fileutils.LineEnd, " ", -1)
-	if len(value) > size {
-		value = value[0:size-5] + " [..]"
-	}
-	return value
 }
 
 func shiftColsVal(opts []string) int {
@@ -393,17 +443,12 @@ func columns(offset int, value string) []string {
 	return cols
 }
 
-func verticalRows(hdrs []string, rows [][]string) [][]string {
+func verticalRows(rows [][]verticalRow) [][]string {
 	var vrows [][]string
 
 	for i, hrow := range rows {
-		for j, hcol := range hrow {
-			var header string
-			if j < len(hdrs) {
-				header = hdrs[j]
-			}
-
-			vrow := []string{header, hcol}
+		for _, hcol := range hrow {
+			vrow := []string{hcol.header, hcol.content}
 			vrows = append(vrows, vrow)
 		}
 

@@ -15,18 +15,21 @@ import (
 func removeCache(cachePath string) error {
 	err := os.RemoveAll(cachePath)
 	if err != nil {
-		return locale.WrapError(err, "err_remove_cache", "Could not remove State Tool cache directory")
+		if osutils.IsAccessDeniedError(err) {
+			return locale.WrapExternalError(err, "err_remove_cache")
+		}
+		return locale.WrapError(err, "err_remove_cache")
 	}
 	return nil
 }
 
-func undoPrepare(cfg configurable) error {
-	err := prepare.CleanOS(cfg)
+func undoPrepare() error {
+	err := prepare.CleanOS()
 	if err != nil {
 		return locale.WrapError(err, "err_prepare_clean", "Could not perform OS-specific cleanup")
 	}
 
-	toRemove, err := prepare.InstalledPreparedFiles(cfg)
+	toRemove, err := prepare.InstalledPreparedFiles()
 	if err != nil {
 		return locale.WrapError(err, "err_prepared_files", "Could not determine files to remove")
 	}

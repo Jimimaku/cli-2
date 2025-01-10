@@ -2,39 +2,43 @@ package main
 
 import (
 	"errors"
-	"io/ioutil"
 	"os"
 	"path/filepath"
 	"strings"
 
-	anaConst "github.com/ActiveState/cli/internal/analytics/constants"
+	svcApp "github.com/ActiveState/cli/cmd/state-svc/app"
+	svcAutostart "github.com/ActiveState/cli/cmd/state-svc/autostart"
+	"github.com/ActiveState/cli/internal/analytics"
 	"github.com/ActiveState/cli/internal/config"
 	"github.com/ActiveState/cli/internal/constants"
 	"github.com/ActiveState/cli/internal/errs"
-	"github.com/ActiveState/cli/internal/exeutils"
 	"github.com/ActiveState/cli/internal/fileutils"
 	"github.com/ActiveState/cli/internal/installation"
 	"github.com/ActiveState/cli/internal/installmgr"
+	"github.com/ActiveState/cli/internal/legacytray"
 	"github.com/ActiveState/cli/internal/locale"
 	"github.com/ActiveState/cli/internal/logging"
 	"github.com/ActiveState/cli/internal/multilog"
 	"github.com/ActiveState/cli/internal/osutils"
+	"github.com/ActiveState/cli/internal/osutils/autostart"
 	"github.com/ActiveState/cli/internal/output"
+	"github.com/ActiveState/cli/internal/prompt"
+	"github.com/ActiveState/cli/internal/rtutils/ptr"
 	"github.com/ActiveState/cli/internal/subshell"
 	"github.com/ActiveState/cli/internal/subshell/sscommon"
 	"github.com/ActiveState/cli/internal/updater"
 )
 
 type Installer struct {
-	out          output.Outputer
-	cfg          *config.Instance
-	payloadPath  string
-	sessionToken string
+	out         output.Outputer
+	cfg         *config.Instance
+	an          analytics.Dispatcher
+	payloadPath string
 	*Params
 }
 
-func NewInstaller(cfg *config.Instance, out output.Outputer, payloadPath string, params *Params) (*Installer, error) {
-	i := &Installer{cfg: cfg, out: out, payloadPath: payloadPath, Params: params}
+func NewInstaller(cfg *config.Instance, out output.Outputer, an analytics.Dispatcher, payloadPath string, params *Params) (*Installer, error) {
+	i := &Installer{cfg: cfg, out: out, an: an, payloadPath: payloadPath, Params: params}
 	if err := i.sanitizeInput(); err != nil {
 		return nil, errs.Wrap(err, "Could not sanitize input")
 	}
@@ -45,14 +49,25 @@ func NewInstaller(cfg *config.Instance, out output.Outputer, payloadPath string,
 }
 
 func (i *Installer) Install() (rerr error) {
-	if err := fileutils.Touch(filepath.Join(i.path, installation.InstallDirMarker)); err != nil {
-		return errs.Wrap(err, "Could not place install dir marker")
+	isAdmin, err := osutils.IsAdmin()
+	if err != nil {
+		return errs.Wrap(err, "Could not determine if running as Windows administrator")
 	}
-
-	// Store sessionToken to config
-	if i.sessionToken != "" && i.cfg.GetString(anaConst.CfgSessionToken) == "" {
-		if err := i.cfg.Set(anaConst.CfgSessionToken, i.sessionToken); err != nil {
-			return errs.Wrap(err, "Failed to set session token")
+	if isAdmin && !i.Params.isUpdate {
+		prompter := prompt.New(i.out, i.an)
+		if i.Params.nonInteractive {
+			prompter.SetInteractive(false)
+		}
+		if i.Params.force {
+			prompter.SetForce(true)
+		}
+		defaultChoice := i.Params.nonInteractive
+		confirm, err := prompter.Confirm("", locale.T("installer_prompt_is_admin"), &defaultChoice, ptr.To(true))
+		if err != nil {
+			return errs.Wrap(err, "Not confirmed")
+		}
+		if !confirm {
+			return locale.NewInputError("installer_aborted", "Installation aborted by the user")
 		}
 	}
 
@@ -64,10 +79,6 @@ func (i *Installer) Install() (rerr error) {
 	}
 
 	// Stop any running processes that might interfere
-	trayRunning, err := installmgr.IsTrayAppRunning(i.cfg)
-	if err != nil {
-		multilog.Error("Could not determine if state-tray is running: %s", errs.JoinMessage(err))
-	}
 	if err := installmgr.StopRunning(i.path); err != nil {
 		return errs.Wrap(err, "Failed to stop running services")
 	}
@@ -83,6 +94,11 @@ func (i *Installer) Install() (rerr error) {
 		return locale.WrapInputError(err, "err_update_corrupt_install", constants.DocumentationURL)
 	}
 
+	err = legacytray.DetectAndRemove(i.path, i.cfg)
+	if err != nil {
+		multilog.Error("Unable to detect and/or remove legacy tray. Will try again next update. Error: %v", err)
+	}
+
 	// Create target dir
 	if err := fileutils.MkdirUnlessExists(i.path); err != nil {
 		return errs.Wrap(err, "Could not create target directory: %s", i.path)
@@ -93,21 +109,23 @@ func (i *Installer) Install() (rerr error) {
 		return errs.Wrap(err, "Could not prepare for installation")
 	}
 
-	// Copy all the files
-	if err := fileutils.CopyAndRenameFiles(i.payloadPath, i.path); err != nil {
+	// Copy all the files except for the current executable
+	if err := fileutils.CopyAndRenameFiles(i.payloadPath, i.path, filepath.Base(osutils.Executable())); err != nil {
+		if osutils.IsAccessDeniedError(err) {
+			// If we got to this point, we could not copy and rename over existing files.
+			// This is a permission issue. (We have an installer test for copying and renaming over a file
+			// in use, which does not raise an error.)
+			return locale.WrapExternalError(err, "err_update_access_denied", "", errs.JoinMessage(err))
+		}
 		return errs.Wrap(err, "Failed to copy installation files to dir %s. Error received: %s", i.path, errs.JoinMessage(err))
-	}
-
-	// Install Launcher
-	if err := i.installLauncher(); err != nil {
-		return errs.Wrap(err, "Installation of system files failed.")
 	}
 
 	// Set up the environment
 	binDir := filepath.Join(i.path, installation.BinDirName)
-	isAdmin, err := osutils.IsAdmin()
-	if err != nil {
-		return errs.Wrap(err, "Could not determine if running as Windows administrator")
+
+	// Install the state service as an app if necessary
+	if err := i.installSvcApp(binDir); err != nil {
+		return errs.Wrap(err, "Installation of service app failed.")
 	}
 
 	// Configure available shells
@@ -129,20 +147,8 @@ func (i *Installer) Install() (rerr error) {
 
 	// Run state _prepare after updates to facilitate anything the new version of the state tool might need to set up
 	// Yes this is awkward, followup story here: https://www.pivotaltracker.com/story/show/176507898
-	if stdout, stderr, err := exeutils.ExecSimple(stateExec, []string{"_prepare"}, []string{}); err != nil {
+	if stdout, stderr, err := osutils.ExecSimple(stateExec, []string{"_prepare"}, []string{}); err != nil {
 		multilog.Error("_prepare failed after update: %v\n\nstdout: %s\n\nstderr: %s", err, stdout, stderr)
-	}
-
-	// Restart ActiveState Desktop, if it was running prior to installing
-	if trayRunning {
-		trayExec, err := installation.TrayExecFromDir(binDir)
-		if err != nil {
-			return locale.WrapError(err, "err_tray_exec_dir", "", binDir)
-		}
-
-		if _, err := exeutils.ExecuteAndForget(trayExec, []string{}); err != nil {
-			multilog.Error("Could not start state-tray: %s", errs.JoinMessage(err))
-		}
 	}
 
 	logging.Debug("Installation was successful")
@@ -156,9 +162,6 @@ func (i *Installer) InstallPath() string {
 
 // sanitizeInput cleans up the input and inserts fallback values
 func (i *Installer) sanitizeInput() error {
-	if sessionToken, ok := os.LookupEnv(constants.SessionTokenEnvVarName); ok {
-		i.sessionToken = sessionToken
-	}
 	if tag, ok := os.LookupEnv(constants.UpdateTagEnvVarName); ok {
 		i.updateTag = tag
 	}
@@ -166,6 +169,28 @@ func (i *Installer) sanitizeInput() error {
 	var err error
 	if i.path, err = resolveInstallPath(i.path); err != nil {
 		return errs.Wrap(err, "Could not resolve installation path")
+	}
+
+	return nil
+}
+
+func (i *Installer) installSvcApp(binDir string) error {
+	app, err := svcApp.NewFromDir(binDir)
+	if err != nil {
+		return errs.Wrap(err, "Could not create app")
+	}
+
+	err = app.Install()
+	if err != nil {
+		return errs.Wrap(err, "Could not install app")
+	}
+
+	if err = autostart.Upgrade(app.Path(), svcAutostart.Options); err != nil {
+		return errs.Wrap(err, "Failed to upgrade autostart for service app.")
+	}
+
+	if err = autostart.Enable(app.Path(), svcAutostart.Options); err != nil {
+		return errs.Wrap(err, "Failed to enable autostart for service app.")
 	}
 
 	return nil
@@ -190,7 +215,7 @@ func detectCorruptedInstallDir(path string) error {
 	}
 
 	// Detect if the install dir has files in it
-	files, err := ioutil.ReadDir(path)
+	files, err := os.ReadDir(path)
 	if err != nil {
 		return errs.Wrap(err, "Could not read directory: %s", path)
 	}
@@ -206,33 +231,35 @@ func detectCorruptedInstallDir(path string) error {
 }
 
 func isStateExecutable(name string) bool {
-	if name == constants.StateCmd+exeutils.Extension || name == constants.StateSvcCmd+exeutils.Extension || name == constants.StateTrayCmd+exeutils.Extension {
+	if name == constants.StateCmd+osutils.ExeExtension || name == constants.StateSvcCmd+osutils.ExeExtension {
 		return true
 	}
 	return false
 }
 
-func installedOnPath(installRoot, branch string) (bool, string, string, error) {
+func installedOnPath(installRoot, channel string) (bool, string, error) {
 	if !fileutils.DirExists(installRoot) {
-		return false, "", "", nil
+		return false, "", nil
 	}
 
 	// This is not using appinfo on purpose because we want to deal with legacy installation formats, which appinfo does not
-	stateCmd := constants.StateCmd + exeutils.Extension
+	stateCmd := constants.StateCmd + osutils.ExeExtension
 
-	// Check for state.exe in branch, root and bin dir
+	// Check for state.exe in channel, root and bin dir
 	// This is to handle older state tool versions that gave incompatible input paths
+	// Also, fall back on checking for the install dir marker in case of a failed uninstall attempt.
 	candidates := []string{
-		filepath.Join(installRoot, branch, installation.BinDirName, stateCmd),
-		filepath.Join(installRoot, branch, stateCmd),
+		filepath.Join(installRoot, channel, installation.BinDirName, stateCmd),
+		filepath.Join(installRoot, channel, stateCmd),
 		filepath.Join(installRoot, installation.BinDirName, stateCmd),
 		filepath.Join(installRoot, stateCmd),
+		filepath.Join(installRoot, installation.InstallDirMarker),
 	}
 	for _, candidate := range candidates {
 		if fileutils.TargetExists(candidate) {
-			return true, installRoot, candidate, nil
+			return true, installRoot, nil
 		}
 	}
 
-	return false, installRoot, stateCmd, nil
+	return false, installRoot, nil
 }

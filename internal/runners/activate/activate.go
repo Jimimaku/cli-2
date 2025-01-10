@@ -4,7 +4,6 @@ import (
 	"fmt"
 	"os"
 	"os/user"
-	"path/filepath"
 	rt "runtime"
 
 	"github.com/ActiveState/cli/internal/analytics"
@@ -22,20 +21,24 @@ import (
 	"github.com/ActiveState/cli/internal/process"
 	"github.com/ActiveState/cli/internal/prompt"
 	"github.com/ActiveState/cli/internal/runbits/activation"
+	"github.com/ActiveState/cli/internal/runbits/checkout"
 	"github.com/ActiveState/cli/internal/runbits/findproject"
+	"github.com/ActiveState/cli/internal/runbits/git"
 	"github.com/ActiveState/cli/internal/runbits/runtime"
+	"github.com/ActiveState/cli/internal/runbits/runtime/trigger"
 	"github.com/ActiveState/cli/internal/subshell"
 	"github.com/ActiveState/cli/internal/virtualenvironment"
-	"github.com/ActiveState/cli/pkg/cmdlets/checker"
-	"github.com/ActiveState/cli/pkg/cmdlets/checkout"
-	"github.com/ActiveState/cli/pkg/cmdlets/git"
+	"github.com/ActiveState/cli/pkg/localcommit"
 	"github.com/ActiveState/cli/pkg/platform/authentication"
 	"github.com/ActiveState/cli/pkg/platform/model"
-	"github.com/ActiveState/cli/pkg/platform/runtime/target"
 	"github.com/ActiveState/cli/pkg/project"
 )
 
 type Activate struct {
+	prime primeable
+	// The remainder is redundant with the above. Refactoring this will follow in a later story so as not to blow
+	// up the one that necessitates adding the primer at this level.
+	// https://activestatef.atlassian.net/browse/DX-2869
 	activateCheckout *checkout.Checkout
 	auth             *authentication.Auth
 	out              output.Outputer
@@ -67,6 +70,7 @@ type primeable interface {
 
 func NewActivate(prime primeable) *Activate {
 	return &Activate{
+		prime,
 		checkout.New(git.NewRepo(), prime),
 		prime.Auth(),
 		prime.Output(),
@@ -79,14 +83,8 @@ func NewActivate(prime primeable) *Activate {
 	}
 }
 
-func (r *Activate) Run(params *ActivateParams) error {
-	return r.run(params)
-}
-
-func (r *Activate) run(params *ActivateParams) error {
+func (r *Activate) Run(params *ActivateParams) (rerr error) {
 	logging.Debug("Activate %v, %v", params.Namespace, params.PreferredPath)
-
-	checker.RunUpdateNotifier(r.svcModel, r.out)
 
 	r.out.Notice(output.Title(locale.T("info_activating_state")))
 
@@ -97,7 +95,7 @@ func (r *Activate) run(params *ActivateParams) error {
 		}
 
 		// Perform fresh checkout
-		pathToUse, err := r.activateCheckout.Run(params.Namespace, params.Branch, params.PreferredPath)
+		pathToUse, err := r.activateCheckout.Run(params.Namespace, params.Branch, "", params.PreferredPath, false, false, false)
 		if err != nil {
 			return locale.WrapError(err, "err_activate_pathtouse", "Could not figure out what path to use.")
 		}
@@ -108,6 +106,8 @@ func (r *Activate) run(params *ActivateParams) error {
 		}
 	}
 
+	r.prime.SetProject(proj)
+
 	alreadyActivated := process.IsActivated(r.config)
 	if alreadyActivated {
 		if !params.Default {
@@ -117,7 +117,7 @@ func (r *Activate) run(params *ActivateParams) error {
 			}
 
 			if (params.Namespace != nil && activated == params.Namespace.String()) || (proj != nil && activated == proj.NamespaceString()) {
-				r.out.Print(locale.Tl("already_activate", "Your project is already active"))
+				r.out.Notice(locale.Tl("already_activate", "Your project is already active"))
 				return nil
 			}
 
@@ -133,28 +133,30 @@ func (r *Activate) run(params *ActivateParams) error {
 		}
 
 		if params.Namespace == nil || params.Namespace.IsValid() {
-			return locale.NewInputError("err_conflicting_default_while_activated", "Cannot make [NOTICE]{{.V0}}[/RESET] always available for use while in an activated state.", params.Namespace.String())
+			return locale.NewInputError(
+				"err_conflicting_default_while_activated",
+				"Cannot make [NOTICE]{{.V0}}[/RESET] always available for use while in an activated state.",
+				params.Namespace.String(),
+			)
 		}
 	}
 
-	if proj != nil && params.Branch != "" {
-		if proj.IsHeadless() {
-			return locale.NewInputError(
-				"err_conflicting_branch_while_headless",
-				"Cannot activate branch [NOTICE]{{.V0}}[/RESET] while in a headless state. Please visit {{.V1}} to create your project.",
-				params.Branch, proj.URL(),
-			)
-		}
+	if proj != nil && params.Branch != "" && params.Branch != proj.BranchName() {
+		return locale.NewInputError("err_conflicting_branch_while_checkedout", "", params.Branch, proj.BranchName())
+	}
 
-		if params.Branch != proj.BranchName() {
-			return locale.NewInputError("err_conflicting_branch_while_checkedout", "", params.Branch, proj.BranchName())
+	if proj != nil {
+		commitID, err := localcommit.Get(proj.Dir())
+		if err != nil {
+			return errs.Wrap(err, "Unable to get local commit")
+		}
+		if cid := params.Namespace.CommitID; cid != nil && *cid != commitID {
+			return locale.NewInputError("err_activate_commit_id_mismatch")
 		}
 	}
 
 	// Have to call this once the project has been set
 	r.analytics.Event(anaConsts.CatActivationFlow, "start")
-
-	proj.Source().Persist()
 
 	// Yes this is awkward, issue here - https://www.pivotaltracker.com/story/show/175619373
 	activatedKey := fmt.Sprintf("activated_%s", proj.Namespace().String())
@@ -169,12 +171,12 @@ func (r *Activate) run(params *ActivateParams) error {
 		} else {
 			r.out.Notice(locale.Tl(
 				"activate_default_optin_msg",
-				"To make this project always available for use without activating it in the future, run your activate command with the `[ACTIONABLE]--default[/RESET]` flag.",
+				"To make this project always available for use without activating it in the future, run your activate command with the '[ACTIONABLE]--default[/RESET]' flag.",
 			))
 		}
 	}
 
-	rt, err := runtime.NewFromProject(proj, target.TriggerActivate, r.analytics, r.svcModel, r.out, r.auth)
+	rt, err := runtime_runbit.Update(r.prime, trigger.TriggerActivate, runtime_runbit.WithoutHeaders(), runtime_runbit.WithIgnoreAsync())
 	if err != nil {
 		return locale.WrapError(err, "err_could_not_activate_venv", "Could not activate project")
 	}
@@ -194,8 +196,12 @@ func (r *Activate) run(params *ActivateParams) error {
 		}
 	}
 
-	if proj.CommitID() == "" {
-		err := locale.NewInputError("err_project_no_commit", "Your project does not have a commit ID, please run `state push` first.", model.ProjectURL(proj.Owner(), proj.Name(), ""))
+	commitID, err := localcommit.Get(proj.Dir())
+	if err != nil {
+		return errs.Wrap(err, "Unable to get local commit")
+	}
+	if commitID == "" {
+		err := locale.NewInputError("err_project_no_commit", "Your project does not have a commit ID. Please run [ACTIONIABLE]'state push'[/RESET] first.", model.ProjectURL(proj.Owner(), proj.Name(), ""))
 		return errs.AddTips(err, "Run → [ACTIONABLE]state push[/RESET] to create your project")
 	}
 
@@ -203,41 +209,7 @@ func (r *Activate) run(params *ActivateParams) error {
 		return locale.WrapError(err, "err_activate_wait", "Could not activate runtime environment.")
 	}
 
-	if proj.IsHeadless() {
-		r.out.Notice(locale.T("info_deactivated_by_commit"))
-	} else {
-		r.out.Notice(locale.T("info_deactivated", proj))
-	}
-
-	return nil
-}
-
-func updateProjectFile(prj *project.Project, names *project.Namespaced, providedBranch string) error {
-	branch := providedBranch
-	if branch == "" {
-		branch = constants.DefaultBranchName
-	}
-
-	var commitID string
-	if names.CommitID == nil || *names.CommitID == "" {
-		latestID, err := model.BranchCommitID(names.Owner, names.Project, branch)
-		if err != nil {
-			return locale.WrapInputError(err, "err_set_namespace_retrieve_commit", "Could not retrieve the latest commit for the specified project {{.V0}}.", names.String())
-		}
-		commitID = latestID.String()
-	} else {
-		commitID = names.CommitID.String()
-	}
-
-	if err := prj.Source().SetNamespace(names.Owner, names.Project); err != nil {
-		return locale.WrapError(err, "err_activate_replace_write_namespace", "Failed to update project namespace.")
-	}
-	if err := prj.SetCommit(commitID); err != nil {
-		return locale.WrapError(err, "err_activate_replace_write_commit", "Failed to update commitID.")
-	}
-	if err := prj.Source().SetBranch(branch); err != nil {
-		return locale.WrapError(err, "err_activate_replace_write_branch", "Failed to update Branch.")
-	}
+	r.out.Notice(locale.T("info_deactivated", proj))
 
 	return nil
 }
@@ -268,8 +240,8 @@ func warningForAdministrator(out output.Outputer) {
 }
 
 func parentNamespace() (string, error) {
-	path := os.Getenv(constants.ProjectEnvVarName)
-	proj, err := project.FromExactPath(filepath.Dir(path))
+	path := os.Getenv(constants.ActivatedStateEnvVarName)
+	proj, err := project.FromExactPath(path)
 	if err != nil {
 		return "", locale.WrapError(err, "err_activate_projectpath", "Could not get project from path {{.V0}}", path)
 	}

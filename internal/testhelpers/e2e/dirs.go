@@ -1,7 +1,6 @@
 package e2e
 
 import (
-	"io/ioutil"
 	"os"
 	"path/filepath"
 )
@@ -21,12 +20,16 @@ type Dirs struct {
 	DefaultBin string
 	// SockRoot is the directory for the state service's socket file
 	SockRoot string
+	// HomeDir is used as the test user's home directory
+	HomeDir string
+	// TempDir is the directory where temporary files are stored
+	TempDir string
 }
 
 // NewDirs creates all temporary directories
 func NewDirs(base string) (*Dirs, error) {
 	if base == "" {
-		tmpDir, err := ioutil.TempDir("", "")
+		tmpDir, err := os.MkdirTemp("", "")
 		if err != nil {
 			return nil, err
 		}
@@ -39,8 +42,10 @@ func NewDirs(base string) (*Dirs, error) {
 	work := filepath.Join(base, "work")
 	defaultBin := filepath.Join(base, "cache", "bin")
 	sockRoot := filepath.Join(base, "sock")
+	homeDir := filepath.Join(base, "home")
+	tempDir := filepath.Join(base, "temp")
 
-	subdirs := []string{config, cache, bin, work, defaultBin}
+	subdirs := []string{config, cache, bin, work, defaultBin, sockRoot, homeDir, tempDir}
 	for _, subdir := range subdirs {
 		if err := os.MkdirAll(subdir, 0700); err != nil {
 			return nil, err
@@ -55,6 +60,8 @@ func NewDirs(base string) (*Dirs, error) {
 		Work:       work,
 		DefaultBin: defaultBin,
 		SockRoot:   sockRoot,
+		HomeDir:    homeDir,
+		TempDir:    tempDir,
 	}
 
 	return &dirs, nil

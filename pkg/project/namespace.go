@@ -4,11 +4,10 @@ import (
 	"fmt"
 	"regexp"
 
-	"github.com/go-openapi/strfmt"
-
 	"github.com/ActiveState/cli/internal/fileutils"
 	"github.com/ActiveState/cli/internal/locale"
 	"github.com/ActiveState/cli/pkg/projectfile"
+	"github.com/go-openapi/strfmt"
 )
 
 // NamespaceRegex matches the org and project name in a namespace, eg. org/project
@@ -107,7 +106,11 @@ func ParseNamespace(raw string) (*Namespaced, error) {
 	}
 
 	if len(groups) > 3 && len(groups[3]) > 0 {
-		uuid := strfmt.UUID(groups[3])
+		uuidString := groups[3]
+		if !strfmt.IsUUID(uuidString) {
+			return nil, locale.NewInputError("err_invalid_commit_id", "", uuidString)
+		}
+		uuid := strfmt.UUID(uuidString)
 		names.CommitID = &uuid
 	}
 
@@ -127,7 +130,11 @@ func ParseProjectNoOwner(raw string) (*Namespaced, error) {
 	}
 
 	if len(groups) > 2 && len(groups[2]) > 0 {
-		uuid := strfmt.UUID(groups[2])
+		uuidString := groups[2]
+		if !strfmt.IsUUID(uuidString) {
+			return nil, locale.NewInputError("err_invalid_commit_id", "", uuidString)
+		}
+		uuid := strfmt.UUID(uuidString)
 		names.CommitID = &uuid
 	}
 
@@ -151,10 +158,9 @@ func NameSpaceForConfig(configFile string) *Namespaced {
 		Project: prj.Name(),
 	}
 
-	prjCommitID := prj.CommitID()
-	if prjCommitID != "" {
-		uuid := strfmt.UUID(prjCommitID)
-		names.CommitID = &uuid
+	commitID := strfmt.UUID(prj.LegacyCommitID()) // Not using localcommit due to import cycle. See anti-pattern comment in localcommit pkg.
+	if commitID != "" {
+		names.CommitID = &commitID
 	}
 
 	return &names

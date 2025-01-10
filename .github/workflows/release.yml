@@ -13,48 +13,35 @@ jobs:
     timeout-minutes: 30
     runs-on: windows-2019
     if: github.event.ref_type == 'tag' && contains(github.event.ref, 'release/remote-installer')
+    permissions:
+      id-token: write # This is required for requesting the JWT
     env:
-      ACTIVESTATE_CLI_DISABLE_RUNTIME: true
-      GOFLAGS: -mod=vendor
-      SHELL: bash
+      ACTIVESTATE_CI: true
       GITHUB_REPO_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      AWS_REGION : "us-east-1"
+      AWS_ROLE_SESSION_NAME: "gha-activestate-cli"
 
     # === OS Specific Steps ===
     steps:
       - # Checkout Code
         name: Checkout code
-        uses: actions/checkout@v2
+        uses: actions/checkout@v5
 
       - # === Install Go ===
         name: Install Go
-        uses: actions/setup-go@v2
+        uses: actions/setup-go@v3
         with:
-          go-version: 1.18.x
+          go-version: '1.22.x'
 
-      - # === Setup ===
-        name: Setup
-        shell: bash
-        run: |
-          bin=$(pwd)/.github/deps/${{ runner.os }}/bin
-          echo "Adding $bin to PATH"
-          echo "$bin" >> $GITHUB_PATH
-
-      - # === Setup Windows ===
-        name: Setup (Windows)
-        shell: pwsh
-        run: |
-          echo "${PSScriptRoot}/.github/deps/${{ runner.os }}/bin" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
-
-      - # === Install Deps ===
-        name: Install Deps
-        shell: bash
-        run: state run install-deps
+      - # === Install State Tool ===
+        name: Install State Tool
+        uses: ActiveState/setup-state-tool@v1
 
       - # === Preprocess ===
         name: Preprocess
         shell: bash
         timeout-minutes: 1
-        run: state run preprocess
+        run: state run preprocess -v
 
       - # === Build Remote Installer ===
         name: Build Remote Installer
@@ -77,10 +64,16 @@ jobs:
           CODE_SIGNING_PASSWD: ${{ secrets.CODE_SIGNING_PASSWD }}
           MSI_CERT_BASE64: ${{ secrets.MSI_CERT_BASE64 }}
 
+      - # === Configure AWS credentials ==
+        name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v2
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_TO_ASSUME }}
+          role-session-name: ${{ env.AWS_ROLE_SESSION_NAME }}
+          aws-region: ${{ env.AWS_REGION }}
+          mask-aws-account-id: true
+
       - # === Deploy ===
         name: Deploy
         shell: bash
         run: state run deploy-remote-installer
-        env:
-          AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
-          AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}

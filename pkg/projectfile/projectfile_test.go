@@ -1,21 +1,23 @@
 package projectfile
 
 import (
-	"io/ioutil"
 	"os"
 	"path/filepath"
 	"reflect"
 	"strings"
 	"testing"
 
-	"github.com/stretchr/testify/assert"
-	"github.com/stretchr/testify/require"
-	"gopkg.in/yaml.v2"
-
 	"github.com/ActiveState/cli/internal/config"
 	"github.com/ActiveState/cli/internal/constants"
 	"github.com/ActiveState/cli/internal/environment"
 	"github.com/ActiveState/cli/internal/errs"
+	"github.com/ActiveState/cli/internal/fileutils"
+	"github.com/ActiveState/cli/internal/language"
+	"github.com/ActiveState/cli/internal/locale"
+	"github.com/ActiveState/cli/internal/osutils"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+	"gopkg.in/yaml.v2"
 )
 
 func setCwd(t *testing.T, subdir string) {
@@ -47,23 +49,6 @@ environments: valueForEnvironments`)
 	assert.Equal(t, "", project.Path(), "Path should be empty")
 }
 
-func TestPlatformStruct(t *testing.T) {
-	platform := Platform{}
-	dat := strings.TrimSpace(`
-name: valueForName
-os: valueForOS
-version: valueForVersion
-architecture: valueForArch`)
-
-	err := yaml.Unmarshal([]byte(dat), &platform)
-	assert.Nil(t, err, "Should not throw an error")
-
-	assert.Equal(t, "valueForName", platform.Name, "Name should be set")
-	assert.Equal(t, "valueForOS", platform.Os, "OS should be set")
-	assert.Equal(t, "valueForVersion", platform.Version, "Version should be set")
-	assert.Equal(t, "valueForArch", platform.Architecture, "Architecture should be set")
-}
-
 func TestBuildStruct(t *testing.T) {
 	build := make(Build)
 	dat := strings.TrimSpace(`
@@ -75,34 +60,6 @@ key2: val2`)
 
 	assert.Equal(t, "val1", build["key1"], "Key1 should be set")
 	assert.Equal(t, "val2", build["key2"], "Key2 should be set")
-}
-
-func TestLanguageStruct(t *testing.T) {
-	language := Language{}
-	dat := strings.TrimSpace(`
-name: valueForName
-version: valueForVersion`)
-
-	err := yaml.Unmarshal([]byte(dat), &language)
-	assert.Nil(t, err, "Should not throw an error")
-
-	assert.Equal(t, "valueForName", language.Name, "Name should be set")
-	assert.Equal(t, "valueForVersion", language.Version, "Version should be set")
-}
-
-func TestConstraintStruct(t *testing.T) {
-	constraint := Constraint{}
-	dat := strings.TrimSpace(`
-os: valueForOS
-platform: valueForPlatform
-environment: valueForEnvironment`)
-
-	err := yaml.Unmarshal([]byte(dat), &constraint)
-	assert.Nil(t, err, "Should not throw an error")
-
-	assert.Equal(t, "valueForOS", constraint.OS, "Os should be set")
-	assert.Equal(t, "valueForPlatform", constraint.Platform, "Platform should be set")
-	assert.Equal(t, "valueForEnvironment", constraint.Environment, "Environment should be set")
 }
 
 func TestPackageStruct(t *testing.T) {
@@ -181,37 +138,14 @@ func TestParse(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	project, err := Parse(filepath.Join(rootpath, "activestate.yml.nope"))
+	_, err = Parse(filepath.Join(rootpath, "activestate.yml.nope"))
 	assert.Error(t, err, "Should throw an error")
 
-	project, err = Parse(filepath.Join(rootpath, "pkg", "projectfile", "testdata", "activestate.yaml"))
+	project, err := Parse(filepath.Join(rootpath, "pkg", "projectfile", "testdata", "activestate.yaml"))
 	require.NoError(t, err, "Should not throw an error")
 
 	assert.NotEmpty(t, project.Project, "Project should be set")
-	assert.NotEmpty(t, project.Platforms, "Platforms should be set")
 	assert.NotEmpty(t, project.Environments, "Environments should be set")
-
-	assert.NotEmpty(t, project.Platforms[0].Name, "Platform name should be set")
-	assert.NotEmpty(t, project.Platforms[0].Os, "Platform OS name should be set")
-	assert.NotEmpty(t, project.Platforms[0].Architecture, "Platform architecture name should be set")
-	assert.NotEmpty(t, project.Platforms[0].Libc, "Platform libc name should be set")
-	assert.NotEmpty(t, project.Platforms[0].Compiler, "Platform compiler name should be set")
-
-	assert.NotEmpty(t, project.Languages[0].Name, "Language name should be set")
-	assert.NotEmpty(t, project.Languages[0].Version, "Language version should be set")
-
-	assert.NotEmpty(t, project.Languages[0].Packages[0].Name, "Package name should be set")
-	assert.NotEmpty(t, project.Languages[0].Packages[0].Version, "Package version should be set")
-
-	assert.NotEmpty(t, project.Languages[0].Packages[0].Build, "Package build should be set")
-	assert.NotEmpty(t, project.Languages[0].Packages[0].Build["debug"], "Build debug should be set")
-
-	assert.NotEmpty(t, project.Languages[0].Packages[1].Build, "Package build should be set")
-	assert.NotEmpty(t, project.Languages[0].Packages[1].Build["override"], "Build override should be set")
-
-	assert.NotEmpty(t, project.Languages[0].Constraints.OS, "Platform constraint should be set")
-	assert.NotEmpty(t, project.Languages[0].Constraints.Platform, "Platform constraint should be set")
-	assert.NotEmpty(t, project.Languages[0].Constraints.Environment, "Environment constraint should be set")
 
 	assert.NotEmpty(t, project.Constants[0].Name, "Constant name should be set")
 	assert.NotEmpty(t, project.Constants[0].Value, "Constant value should be set")
@@ -238,16 +172,17 @@ func TestSave(t *testing.T) {
 
 	path := filepath.Join(rootpath, "pkg", "projectfile", "testdata", "activestate.yaml")
 	project, err := Parse(path)
-	require.NoError(t, err, errs.Join(err, "\n").Error())
+	require.NoError(t, err, errs.JoinMessage(err))
 
-	tmpfile, err := ioutil.TempFile("", "test")
-	require.NoError(t, err, errs.Join(err, "\n").Error())
+	tmpfile, err := os.CreateTemp("", "test")
+	require.NoError(t, err, errs.JoinMessage(err))
 
 	cfg, err := config.New()
 	require.NoError(t, err)
 	defer func() { require.NoError(t, cfg.Close()) }()
 	project.path = tmpfile.Name()
-	project.Save(cfg)
+	err = project.Save(cfg)
+	require.NoError(t, err)
 
 	stat, err := tmpfile.Stat()
 	assert.NoError(t, err, "Should be able to stat file")
@@ -270,90 +205,120 @@ func TestSave(t *testing.T) {
 	assert.FileExists(t, tmpfile.Name(), "Project file is saved")
 	assert.NotZero(t, stat.Size(), "Project file should have data")
 
-	os.Remove(tmpfile.Name())
+	err = os.Remove(tmpfile.Name())
+	assert.NoError(t, err, "Should remove our temp file")
 }
 
-// Call getProjectFilePath
 func TestGetProjectFilePath(t *testing.T) {
-	Reset()
+	currentDir, err := os.Getwd()
+	require.NoError(t, err)
+	defer func() {
+		err = os.Chdir(currentDir)
+		require.NoError(t, err)
+	}()
 
-	root, err := environment.GetRootPath()
-	assert.NoError(t, err, "Should detect root path")
-	cwd, err := os.Getwd()
-	assert.NoError(t, err, "Should fetch cwd")
-	defer os.Chdir(cwd) // restore
-	os.Chdir(filepath.Join(root, "pkg", "projectfile", "testdata"))
+	rootDir, err := fileutils.ResolvePath(fileutils.TempDirUnsafe())
+	assert.NoError(t, err)
+	defer os.RemoveAll(rootDir)
 
-	configPath, err := GetProjectFilePath()
-	require.Nil(t, err)
-	expectedPath := filepath.Join(root, "pkg", "projectfile", "testdata", constants.ConfigFileName)
-	assert.Equal(t, expectedPath, configPath, "Project path is properly detected")
+	// First, set up a new project with a subproject.
+	projectDir := filepath.Join(rootDir, "project")
+	require.NoError(t, fileutils.Mkdir(projectDir))
+	projectYaml := filepath.Join(projectDir, constants.ConfigFileName)
+	require.NoError(t, fileutils.Touch(projectYaml))
+	subprojectDir := filepath.Join(projectDir, "subproject")
+	require.NoError(t, fileutils.Mkdir(subprojectDir))
+	subprojectYaml := filepath.Join(subprojectDir, constants.ConfigFileName)
+	require.NoError(t, fileutils.Mkdir(subprojectDir))
+	require.NoError(t, fileutils.Touch(subprojectYaml))
 
-	defer os.Unsetenv(constants.ProjectEnvVarName)
-
-	os.Setenv(constants.ProjectEnvVarName, "/some/path")
-	configPath, err = GetProjectFilePath()
-	errt := &ErrorNoProjectFromEnv{}
-	require.ErrorAs(t, err, &errt)
-
-	expectedPath = filepath.Join(root, "pkg", "projectfile", "testdata", constants.ConfigFileName)
-	os.Setenv(constants.ProjectEnvVarName, expectedPath)
-	configPath, err = GetProjectFilePath()
-	require.Nil(t, err)
-	assert.Equal(t, expectedPath, configPath, "Project path is properly detected using the ProjectEnvVarName")
-
-	os.Unsetenv(constants.ProjectEnvVarName)
-	tmpDir, err := ioutil.TempDir("", "")
-	assert.NoError(t, err, "Should create temp dir")
-	defer os.RemoveAll(tmpDir)
-	os.Chdir(tmpDir)
-	_, err = GetProjectFilePath()
-	assert.Error(t, err, "GetProjectFilePath should fail")
+	// Then set up a separate, default project.
+	defaultDir := filepath.Join(rootDir, "default")
+	require.NoError(t, fileutils.Mkdir(defaultDir))
+	defaultYaml := filepath.Join(defaultDir, constants.ConfigFileName)
+	require.NoError(t, fileutils.Touch(defaultYaml))
 	cfg, err := config.New()
 	require.NoError(t, err)
 	defer func() { require.NoError(t, cfg.Close()) }()
-	cfg.Set(constants.GlobalDefaultPrefname, expectedPath)
-	configPath, err = GetProjectFilePath()
-	assert.NoError(t, err, "GetProjectFilePath should succeed")
-	assert.Equal(t, expectedPath, configPath, "Project path is properly detected using default path from config")
+	err = cfg.Set(constants.GlobalDefaultPrefname, defaultDir)
+	require.NoError(t, err)
+
+	// Now set up an empty directory.
+	emptyDir := filepath.Join(rootDir, "empty")
+	require.NoError(t, fileutils.Mkdir(emptyDir))
+
+	// Now change to the project directory and assert GetProjectFilePath() returns it over the
+	// default project.
+	require.NoError(t, os.Chdir(projectDir))
+	path, err := GetProjectFilePath()
+	assert.NoError(t, err)
+	assert.Equal(t, projectYaml, path)
+
+	// `state shell` sets an environment variable, so run `state shell` in this project and then
+	// change to the subproject directory. Assert GetProjectFilePath() still returns the parent
+	// project.
+	require.NoError(t, os.Setenv(constants.ActivatedStateEnvVarName, projectDir))
+	defer os.Unsetenv(constants.ProfileEnvVarName)
+	require.NoError(t, os.Chdir(subprojectDir))
+	path, err = GetProjectFilePath()
+	assert.NoError(t, err)
+	assert.Equal(t, projectYaml, path)
+
+	// If the project were to not exist, GetProjectFilePath() should return a typed error.
+	require.NoError(t, os.Setenv(constants.ActivatedStateEnvVarName, filepath.Join(rootDir, "does-not-exist")))
+	_, err = GetProjectFilePath()
+	errNoProjectFromEnv := &ErrorNoProjectFromEnv{}
+	assert.ErrorAs(t, err, &errNoProjectFromEnv)
+
+	// After exiting out of the shell, the environment variable is no longer set. Assert
+	// GetProjectFilePath() returns the subproject.
+	require.NoError(t, os.Unsetenv(constants.ActivatedStateEnvVarName))
+	path, err = GetProjectFilePath()
+	assert.NoError(t, err)
+	assert.Equal(t, subprojectYaml, path)
+
+	// If a project's subdirectory does not contain an activestate.yaml file, GetProjectFilePath()
+	// should walk up the tree until it finds one.
+	require.NoError(t, os.Remove(subprojectYaml))
+	path, err = GetProjectFilePath()
+	assert.NoError(t, err)
+	assert.Equal(t, projectYaml, path)
+
+	// Change to an empty directory and assert GetProjectFilePath() returns the default project.
+	require.NoError(t, os.Chdir(emptyDir))
+	path, err = GetProjectFilePath()
+	assert.NoError(t, err)
+	assert.Equal(t, defaultYaml, path)
+
+	// If the default project no longer exists, GetProjectFilePath() should return a typed error.
+	err = cfg.Set(constants.GlobalDefaultPrefname, filepath.Join(rootDir, "does-not-exist"))
+	require.NoError(t, err)
+	_, err = GetProjectFilePath()
+	errNoDefaultProject := &ErrorNoDefaultProject{}
+	assert.ErrorAs(t, err, &errNoDefaultProject)
+
+	// If none of the above, GetProjectFilePath() should return a typed error.
+	err = cfg.Set(constants.GlobalDefaultPrefname, "")
+	require.NoError(t, err)
+	_, err = GetProjectFilePath()
+	errNoProject := &ErrorNoProject{}
+	assert.ErrorAs(t, err, &errNoProject)
 }
 
-// TestGet the config
-func TestGet(t *testing.T) {
+// TestFromEnv the config
+func TestFromEnv(t *testing.T) {
 	root, err := environment.GetRootPath()
 	assert.NoError(t, err, "Should detect root path")
-	cwd, _ := os.Getwd()
-	os.Chdir(filepath.Join(root, "pkg", "projectfile", "testdata"))
+	cwd, _ := osutils.Getwd()
+	err = os.Chdir(filepath.Join(root, "pkg", "projectfile", "testdata"))
+	require.NoError(t, err, "Should change dir without issue.")
 
-	config := Get()
+	config, err := FromEnv()
+	require.NoError(t, err)
 	assert.NotNil(t, config, "Config should be set")
-	assert.NotEqual(t, "", os.Getenv(constants.ProjectEnvVarName), "The project env var should be set")
 
-	os.Chdir(cwd) // restore
-
-	Reset()
-}
-
-func TestGetActivated(t *testing.T) {
-	root, _ := environment.GetRootPath()
-	cwd, _ := os.Getwd()
-	os.Chdir(filepath.Join(root, "pkg", "projectfile", "testdata"))
-
-	config1 := Get()
-	assert.Equal(t, filepath.Join(root, "pkg", "projectfile", "testdata", constants.ConfigFileName), os.Getenv(constants.ProjectEnvVarName), "The activated state's config file is set")
-
-	os.Chdir(root)
-	config2, err := GetSafe()
-	assert.NoError(t, err, "No error even if no activestate.yaml does not exist")
-	assert.Equal(t, config1, config2, "The same activated state is returned")
-
-	expected := filepath.Join(root, "pkg", "projectfile", "testdata", constants.ConfigFileName)
-	actual := os.Getenv(constants.ProjectEnvVarName)
-	assert.Equal(t, expected, actual, "The activated state's config file is still set properly")
-
-	os.Chdir(cwd) // restore
-
-	Reset()
+	err = os.Chdir(cwd) // restore
+	require.NoError(t, err, "Should change dir without issue.")
 }
 
 func TestParseVersionInfo(t *testing.T) {
@@ -367,8 +332,9 @@ func TestParseVersionInfo(t *testing.T) {
 
 	versionInfo, err = ParseVersionInfo(filepath.Join(getWd(t, "withbadversion"), constants.ConfigFileName))
 	assert.Error(t, err)
+	assert.Nil(t, versionInfo, "No version exists, because bad version")
 
-	path, err := ioutil.TempDir("", "ParseVersionInfoTest")
+	path, err := os.MkdirTemp("", "ParseVersionInfoTest")
 	require.NoError(t, err)
 	versionInfo, err = ParseVersionInfo(filepath.Join(path, constants.ConfigFileName))
 	require.NoError(t, err)
@@ -376,21 +342,22 @@ func TestParseVersionInfo(t *testing.T) {
 }
 
 func TestNewProjectfile(t *testing.T) {
-	dir, err := ioutil.TempDir("", "projectfile-test")
+	dir, err := os.MkdirTemp("", "projectfile-test")
 	assert.NoError(t, err, "Should be no error when getting a temp directory")
-	os.Chdir(dir)
+	err = os.Chdir(dir)
+	assert.NoError(t, err, "Should be no error when changing to the temp directory")
 
-	pjFile, err := TestOnlyCreateWithProjectURL("https://platform.activestate.com/xowner/xproject", dir)
+	pjFile, err := testOnlyCreateWithProjectURL("https://platform.activestate.com/xowner/xproject", dir)
 	assert.NoError(t, err, "There should be no error when loading from a path")
 	assert.Equal(t, "activationMessage", pjFile.Scripts[0].Name)
 
-	_, err = TestOnlyCreateWithProjectURL("https://platform.activestate.com/xowner/xproject", "")
+	_, err = testOnlyCreateWithProjectURL("https://platform.activestate.com/xowner/xproject", "")
 	assert.Error(t, err, "We don't accept blank paths")
 
 	setCwd(t, "")
-	dir, err = os.Getwd()
+	dir, err = osutils.Getwd()
 	assert.NoError(t, err, "Should be no error when getting the CWD")
-	_, err = TestOnlyCreateWithProjectURL("https://platform.activestate.com/xowner/xproject", dir)
+	_, err = testOnlyCreateWithProjectURL("https://platform.activestate.com/xowner/xproject", dir)
 	assert.Error(t, err, "Cannot create new project if existing as.yaml ...exists")
 }
 
@@ -410,78 +377,126 @@ func TestValidateProjectURL(t *testing.T) {
 
 func Test_parseURL(t *testing.T) {
 	tests := []struct {
-		name    string
-		rawURL  string
-		want    projectURL
-		wantErr bool
+		name   string
+		rawURL string
+		want   projectURL
 	}{
 		{
-			"Valid full URL",
+			"Full URL",
 			"https://platform.activestate.com/Owner/Name?commitID=7BA74758-8665-4D3F-921C-757CD271A0C1&branch=main",
 			projectURL{
-				Owner:      "Owner",
-				Name:       "Name",
-				CommitID:   "7BA74758-8665-4D3F-921C-757CD271A0C1",
-				BranchName: "main",
+				Owner:          "Owner",
+				Name:           "Name",
+				LegacyCommitID: "7BA74758-8665-4D3F-921C-757CD271A0C1",
+				BranchName:     "main",
 			},
-			false,
 		},
 		{
-			"Valid commit URL",
+			"Legacy commit URL",
 			"https://platform.activestate.com/commit/7BA74758-8665-4D3F-921C-757CD271A0C1",
 			projectURL{
-				Owner:      "",
-				Name:       "",
-				CommitID:   "7BA74758-8665-4D3F-921C-757CD271A0C1",
-				BranchName: "",
+				Owner:          "",
+				Name:           "",
+				LegacyCommitID: "7BA74758-8665-4D3F-921C-757CD271A0C1",
+				BranchName:     "",
 			},
-			false,
-		},
-		{
-			"Invalid commit",
-			"https://platform.activestate.com/commit/nope",
-			projectURL{},
-			true,
 		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			got, err := parseURL(tt.rawURL)
-			if (err != nil) != tt.wantErr {
-				t.Errorf("parseURL() error = %v, wantErr %v", err, tt.wantErr)
+			if err != nil {
+				t.Errorf("parseURL() error = %v", err)
 				return
 			}
-			if !tt.wantErr && !reflect.DeepEqual(got, tt.want) {
+			if !reflect.DeepEqual(got, tt.want) {
 				t.Errorf("parseURL() got = %v, want %v", got, tt.want)
 			}
 		})
 	}
 }
 
-func TestProject_Init(t *testing.T) {
+func Test_detectDeprecations(t *testing.T) {
 	tests := []struct {
 		name           string
-		project        *Project
-		wantProjectURL *projectURL
-		wantErr        bool
+		dat            string
+		wantMatchError []string
 	}{
 		{
-			"Adds default branch",
-			&Project{Project: "https://platform.activestate.com/owner/name"},
-			&projectURL{
-				"owner",
-				"name",
-				"",
-				"main",
+			"Constraints",
+			`constraints: 0`,
+			[]string{
+				locale.Tr("pjfile_deprecation_entry", "constraints", "0"),
 			},
-			false,
+		},
+		{
+			"Constraints Commented Out",
+			`#constraints: 0`,
+			[]string{},
+		},
+		{
+			"Platforms",
+			`platforms: 0"`,
+			[]string{
+				locale.Tr("pjfile_deprecation_entry", "platforms", "0"),
+			},
+		},
+		{
+			"Languages",
+			`languages: 0`,
+			[]string{
+				locale.Tr("pjfile_deprecation_entry", "languages", "0"),
+			},
+		},
+		{
+			"Mixed",
+			"foo: 0\nconstraints: 0\nbar: 0\nlanguages: 0\nplatforms: 0",
+			[]string{
+				locale.Tr("pjfile_deprecation_entry", "constraints", "7"),
+				locale.Tr("pjfile_deprecation_entry", "languages", "29"),
+				locale.Tr("pjfile_deprecation_entry", "platforms", "42"),
+			},
+		},
+		{
+			"Real world",
+			`project: https://platform.activestate.com/ActiveState-CLI/test
+platforms:
+  - name: Linux64Label
+languages:
+  - name: Go
+    constraints:
+        platform: Windows10Label,Linux64Label`,
+			[]string{
+				locale.Tr("pjfile_deprecation_entry", "platforms", "63"),
+				locale.Tr("pjfile_deprecation_entry", "languages", "97"),
+				locale.Tr("pjfile_deprecation_entry", "constraints", "121"),
+			},
+		},
+		{
+			"Valid",
+			"foo: 0\nbar: 0",
+			[]string{},
 		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			if err := tt.project.Init(); (err != nil) != tt.wantErr {
-				t.Errorf("Init() error = %v, wantErr %v", errs.Join(err, ": "), tt.wantErr)
+			err := detectDeprecations([]byte(tt.dat), "activestate.yaml")
+			if len(tt.wantMatchError) == 0 {
+				assert.NoError(t, err)
+				return
+			}
+			require.Error(t, err)
+			for _, want := range tt.wantMatchError {
+				assert.Contains(t, err.Error(), want)
 			}
 		})
 	}
+}
+
+// testOnlyCreateWithProjectURL a new activestate.yaml with default content
+func testOnlyCreateWithProjectURL(projectURL, path string) (*Project, error) {
+	return createCustom(&CreateParams{
+		ProjectURL: projectURL,
+		Directory:  path,
+	}, language.Python3)
 }

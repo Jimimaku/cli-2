@@ -2,7 +2,7 @@ package inventory
 
 import (
 	"encoding/json"
-	"io/ioutil"
+	"io"
 	"net/http"
 	"net/url"
 
@@ -20,17 +20,19 @@ import (
 // persist contains the active API Client connection
 var persist inventory_operations.ClientService
 
-var transport http.RoundTripper
-
 // Init will create a new API client using default settings
 func Init(auth *authentication.Auth) (inventory_operations.ClientService, runtime.ClientTransport) {
-	return New(api.GetServiceURL(api.ServiceInventory), auth.ClientAuth())
+	var authWriter runtime.ClientAuthInfoWriter
+	if auth != nil {
+		authWriter = auth.ClientAuth()
+	}
+	return New(api.GetServiceURL(api.ServiceInventory), authWriter)
 }
 
 // New initializes a new api client
 func New(serviceURL *url.URL, auth runtime.ClientAuthInfoWriter) (inventory_operations.ClientService, runtime.ClientTransport) {
 	transportRuntime := httptransport.New(serviceURL.Host, serviceURL.Path, []string{serviceURL.Scheme})
-	transportRuntime.Transport = api.NewRoundTripper()
+	transportRuntime.Transport = api.NewRoundTripper(http.DefaultTransport)
 
 	// transportRuntime.SetDebug(true)
 
@@ -42,9 +44,9 @@ func New(serviceURL *url.URL, auth runtime.ClientAuthInfoWriter) (inventory_oper
 }
 
 // Get returns a cached version of the default api client
-func Get() inventory_operations.ClientService {
+func Get(auth *authentication.Auth) inventory_operations.ClientService {
 	if persist == nil {
-		persist, _ = Init(authentication.LegacyGet())
+		persist, _ = Init(auth)
 	}
 	return persist
 }
@@ -82,7 +84,7 @@ type RawResponder struct{}
 
 func (r *RawResponder) ReadResponse(res runtime.ClientResponse, cons runtime.Consumer) (interface{}, error) {
 	defer res.Body().Close()
-	bytes, err := ioutil.ReadAll(res.Body())
+	bytes, err := io.ReadAll(res.Body())
 	if err != nil {
 		return nil, err
 	}

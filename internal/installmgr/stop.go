@@ -1,15 +1,17 @@
 package installmgr
 
 import (
+	"errors"
+	"os"
 	"runtime"
 	"strings"
 	"syscall"
 	"time"
 
+	"github.com/ActiveState/cli/internal/condition"
 	"github.com/ActiveState/cli/internal/config"
 	"github.com/ActiveState/cli/internal/constants"
 	"github.com/ActiveState/cli/internal/errs"
-	"github.com/ActiveState/cli/internal/exeutils"
 	"github.com/ActiveState/cli/internal/fileutils"
 	"github.com/ActiveState/cli/internal/installation"
 	"github.com/ActiveState/cli/internal/locale"
@@ -27,11 +29,6 @@ func StopRunning(installPath string) (rerr error) {
 	}
 	defer rtutils.Closer(cfg.Close, &rerr)
 
-	err = stopTray(installPath, cfg)
-	if err != nil {
-		return errs.Wrap(err, "Could not stop tray")
-	}
-
 	err = stopSvc(installPath)
 	if err != nil {
 		multilog.Critical("Could not stop running service, error: %v", errs.JoinMessage(err))
@@ -41,29 +38,24 @@ func StopRunning(installPath string) (rerr error) {
 	return nil
 }
 
-func stopTray(installPath string, cfg *config.Instance) error {
-	// Todo: https://www.pivotaltracker.com/story/show/177585085
-	// Yes this is awkward right now
-	if err := StopTrayApp(cfg); err != nil {
-		return errs.Wrap(err, "Failed to stop %s", constants.TrayAppName)
-	}
-	return nil
-}
-
 func stopSvc(installPath string) error {
 	svcExec, err := installation.ServiceExecFromDir(installPath)
-	if err != nil {
+	if err != nil && !errors.Is(err, fileutils.ErrorFileNotFound) {
 		return locale.WrapError(err, "err_service_exec_dir", "", installPath)
 	}
 
 	if fileutils.FileExists(svcExec) {
-		exitCode, _, err := exeutils.Execute(svcExec, []string{"stop"}, nil)
+		exitCode, _, err := osutils.Execute(svcExec, []string{"stop"}, nil)
 		if err != nil {
 			// We don't return these errors because we want to fall back on killing the process
 			multilog.Error("Stopping %s returned error: %s", constants.SvcAppName, errs.JoinMessage(err))
 		} else if exitCode != 0 {
 			multilog.Error("Stopping %s exited with code %d", constants.SvcAppName, exitCode)
 		}
+	}
+
+	if condition.OnCI() { // prevent killing valid parallel instances while on CI
+		return nil
 	}
 
 	procs, err := process.Processes()
@@ -81,7 +73,7 @@ func stopSvc(installPath string) error {
 			continue
 		}
 
-		svcName := constants.ServiceCommandName + exeutils.Extension
+		svcName := constants.ServiceCommandName + osutils.ExeExtension
 		if n == svcName {
 			exe, err := p.Exe()
 			if err != nil {
@@ -150,7 +142,9 @@ func killProcess(proc *process.Process, name string) error {
 			err = c.Kill()
 			if err != nil {
 				if osutils.IsAccessDeniedError(err) {
-					return locale.WrapInputError(err, "err_insufficient_permissions")
+					return locale.WrapExternalError(err, "err_insufficient_permissions")
+				} else if errors.Is(err, os.ErrProcessDone) {
+					return nil
 				}
 				return errs.Wrap(err, "Could not kill child process of %s", name)
 			}
@@ -162,7 +156,9 @@ func killProcess(proc *process.Process, name string) error {
 	err = proc.Kill()
 	if err != nil {
 		if osutils.IsAccessDeniedError(err) {
-			return locale.WrapInputError(err, "err_insufficient_permissions")
+			return locale.WrapExternalError(err, "err_insufficient_permissions")
+		} else if errors.Is(err, os.ErrProcessDone) {
+			return nil
 		}
 		return errs.Wrap(err, "Could not kill %s process", name)
 	}

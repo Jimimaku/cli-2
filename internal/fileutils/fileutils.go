@@ -8,7 +8,6 @@ import (
 	"fmt"
 	"io"
 	"io/fs"
-	"io/ioutil"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -17,19 +16,24 @@ import (
 	"time"
 	"unicode"
 
+	"github.com/gofrs/flock"
+	"github.com/labstack/gommon/random"
+	"github.com/thoas/go-funk"
+
+	"github.com/ActiveState/cli/internal/assets"
 	"github.com/ActiveState/cli/internal/errs"
 	"github.com/ActiveState/cli/internal/locale"
 	"github.com/ActiveState/cli/internal/logging"
 	"github.com/ActiveState/cli/internal/multilog"
 	"github.com/ActiveState/cli/internal/rollbar"
-	"github.com/gofrs/flock"
+	"github.com/ActiveState/cli/internal/rtutils/ptr"
 )
 
 // nullByte represents the null-terminator byte
 const nullByte byte = 0
 
 // FileMode is the mode used for created files
-const FileMode = 0644
+const FileMode = 0o644
 
 // DirMode is the mode used for created dirs
 const DirMode = os.ModePerm
@@ -46,18 +50,14 @@ const (
 	AmendByPrepend
 )
 
-var (
-	ErrorFileNotFound = errs.New("File could not be found")
-)
-
-type includeFunc func(path string, contents []byte) (include bool)
+var ErrorFileNotFound = errs.New("File could not be found")
 
 // ReplaceAll replaces all instances of search text with replacement text in a
 // file, which may be a binary file.
 func ReplaceAll(filename, find, replace string) error {
 	// Read the file's bytes and create find and replace byte arrays for search
 	// and replace.
-	fileBytes, err := ioutil.ReadFile(filename)
+	fileBytes, err := os.ReadFile(filename)
 	if err != nil {
 		return err
 	}
@@ -97,7 +97,7 @@ func replaceInFile(buf []byte, oldpath, newpath string) (bool, []byte, error) {
 		quoteEscapeFind = strings.ReplaceAll(quoteEscapeFind, `\\`, `(\\|\\\\)`)
 	}
 	if IsBinary(buf) {
-		//logging.Debug("Assuming file '%s' is a binary file", filename)
+		// logging.Debug("Assuming file '%s' is a binary file", filename)
 
 		regexExpandBytes := []byte("${1}")
 		// Must account for the expand characters (ie. '${1}') in the
@@ -111,14 +111,14 @@ func replaceInFile(buf []byte, oldpath, newpath string) (bool, []byte, error) {
 			return false, nil, errors.New("replacement text cannot be longer than search text in a binary file")
 		} else if len(findBytes) > replaceBytesLen {
 			// Pad replacement with NUL bytes.
-			//logging.Debug("Padding replacement text by %d byte(s)", len(findBytes)-len(replaceBytes))
+			// logging.Debug("Padding replacement text by %d byte(s)", len(findBytes)-len(replaceBytes))
 			paddedReplaceBytes := make([]byte, len(findBytes)+len(regexExpandBytes))
 			copy(paddedReplaceBytes, replaceBytes)
 			replaceBytes = paddedReplaceBytes
 		}
 	} else {
-		replaceRegex = regexp.MustCompile(fmt.Sprintf(`%s`, quoteEscapeFind))
-		//logging.Debug("Assuming file '%s' is a text file", filename)
+		replaceRegex = regexp.MustCompile(quoteEscapeFind)
+		// logging.Debug("Assuming file '%s' is a text file", filename)
 	}
 
 	replaced := replaceRegex.ReplaceAll(buf, replaceBytes)
@@ -142,6 +142,10 @@ func IsBinary(fileBytes []byte) bool {
 
 // TargetExists checks if the given file or folder exists
 func TargetExists(path string) bool {
+	if FileExists(path) || DirExists(path) {
+		return true
+	}
+
 	_, err1 := os.Stat(path)
 	_, err2 := os.Readlink(path) // os.Stat returns false on Symlinks that don't point to a valid file
 	_, err3 := os.Lstat(path)    // for links where os.Stat and os.Readlink fail (e.g. Windows socket files)
@@ -173,7 +177,7 @@ func DirExists(path string) bool {
 // Sha256Hash will sha256 hash the given file
 func Sha256Hash(path string) (string, error) {
 	hasher := sha256.New()
-	b, err := ioutil.ReadFile(path)
+	b, err := os.ReadFile(path)
 	if err != nil {
 		return "", errs.Wrap(err, fmt.Sprintf("Cannot read file: %s", path))
 	}
@@ -193,7 +197,7 @@ func HashDirectory(path string) (string, error) {
 			return nil
 		}
 
-		b, err := ioutil.ReadFile(path)
+		b, err := os.ReadFile(path)
 		if err != nil {
 			return err
 		}
@@ -201,7 +205,6 @@ func HashDirectory(path string) (string, error) {
 
 		return nil
 	})
-
 	if err != nil {
 		return "", errs.Wrap(err, fmt.Sprintf("Cannot hash directory: %s", path))
 	}
@@ -240,6 +243,11 @@ func CopyFile(src, target string) error {
 	}
 	defer in.Close()
 
+	inInfo, err := in.Stat()
+	if err != nil {
+		return errs.Wrap(err, "get file info failed")
+	}
+
 	// Create target directory if it doesn't exist
 	dir := filepath.Dir(target)
 	err = MkdirUnlessExists(dir)
@@ -263,6 +271,25 @@ func CopyFile(src, target string) error {
 	if err != nil {
 		return errs.Wrap(err, "out.Close failed")
 	}
+
+	if err := os.Chmod(out.Name(), inInfo.Mode().Perm()); err != nil {
+		return errs.Wrap(err, "chmod failed")
+	}
+
+	return nil
+}
+
+func CopyAsset(assetName, dest string) error {
+	asset, err := assets.ReadFileBytes(assetName)
+	if err != nil {
+		return errs.Wrap(err, "Asset %s failed", assetName)
+	}
+
+	err = os.WriteFile(dest, asset, 0o644)
+	if err != nil {
+		return errs.Wrap(err, "os.WriteFile %s failed", dest)
+	}
+
 	return nil
 }
 
@@ -276,9 +303,9 @@ func CopyMultipleFiles(files map[string]string) error {
 	return nil
 }
 
-// ReadFileUnsafe is an unsafe version of ioutil.ReadFile, DO NOT USE THIS OUTSIDE OF TESTS
+// ReadFileUnsafe is an unsafe version of os.ReadFile, DO NOT USE THIS OUTSIDE OF TESTS
 func ReadFileUnsafe(src string) []byte {
-	b, err := ioutil.ReadFile(src)
+	b, err := os.ReadFile(src)
 	if err != nil {
 		panic(fmt.Sprintf("Cannot read file: %s, error: %s", src, err.Error()))
 	}
@@ -287,15 +314,15 @@ func ReadFileUnsafe(src string) []byte {
 
 // ReadFile reads the content of a file
 func ReadFile(filePath string) ([]byte, error) {
-	b, err := ioutil.ReadFile(filePath)
+	b, err := os.ReadFile(filePath)
 	if err != nil {
-		return nil, errs.Wrap(err, "ioutil.ReadFile %s failed", filePath)
+		return nil, errs.Wrap(err, "os.ReadFile %s failed", filePath)
 	}
 	return b, nil
 }
 
 // WriteFile writes data to a file, if it exists it is overwritten, if it doesn't exist it is created and data is written
-func WriteFile(filePath string, data []byte) error {
+func WriteFile(filePath string, data []byte) (rerr error) {
 	err := MkdirUnlessExists(filepath.Dir(filePath))
 	if err != nil {
 		return err
@@ -308,14 +335,19 @@ func WriteFile(filePath string, data []byte) error {
 		if err := os.Chmod(filePath, FileMode); err != nil {
 			return errs.Wrap(err, "os.Chmod %s failed", filePath)
 		}
-		defer os.Chmod(filePath, stat.Mode().Perm())
+		defer func() {
+			err = os.Chmod(filePath, stat.Mode().Perm())
+			if err != nil {
+				rerr = errs.Pack(rerr, errs.Wrap(err, "os.Chmod %s failed", filePath))
+			}
+		}()
 	}
 
 	f, err := os.OpenFile(filePath, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, FileMode)
 	if err != nil {
 		if !fileExists {
 			target := filepath.Dir(filePath)
-			err = fmt.Errorf("access to target %q is denied", target)
+			err = errs.Pack(err, fmt.Errorf("access to target %q is denied", target))
 		}
 		return errs.Wrap(err, "os.OpenFile %s failed", filePath)
 	}
@@ -357,8 +389,7 @@ func PrependToFile(filepath string, data []byte) error {
 // AmendFile amends data to a file, supports append, or prepend
 func AmendFile(filePath string, data []byte, flag AmendOptions) error {
 	switch flag {
-	case
-		AmendByAppend, AmendByPrepend:
+	case AmendByAppend, AmendByPrepend:
 
 	default:
 		return locale.NewInputError("fileutils_err_amend_file", "", filePath)
@@ -555,7 +586,7 @@ func MoveAllFilesRecursively(fromPath, toPath string, cb MoveAllFilesCallback) e
 // CopyAndRenameFiles copies files from fromDir to toDir.
 // If the target file exists already, the source file is first copied next to the target file, and then overwrites the target by renaming the source.
 // This method is more robust and than copying directly, in case the target file is opened or executed.
-func CopyAndRenameFiles(fromPath, toPath string) error {
+func CopyAndRenameFiles(fromPath, toPath string, exclude ...string) error {
 	logging.Debug("Copying files from %s to %s", fromPath, toPath)
 
 	if !DirExists(fromPath) {
@@ -572,6 +603,10 @@ func CopyAndRenameFiles(fromPath, toPath string) error {
 
 	// any found files and dirs
 	for _, file := range files {
+		if funk.Contains(exclude, file.Name()) {
+			continue
+		}
+
 		rpath := file.RelativePath()
 		fromPath := filepath.Join(fromPath, rpath)
 		toPath := filepath.Join(toPath, rpath)
@@ -651,10 +686,16 @@ func MoveAllFiles(fromPath, toPath string) error {
 }
 
 // WriteTempFile writes data to a temp file.
-func WriteTempFile(dir, pattern string, data []byte, perm os.FileMode) (string, error) {
-	f, err := ioutil.TempFile(dir, pattern)
+func WriteTempFile(pattern string, data []byte) (string, error) {
+	tempDir := os.TempDir()
+	return WriteTempFileToDir(tempDir, pattern, data, os.ModePerm)
+}
+
+// WriteTempFileToDir writes data to a temp file in the given dir
+func WriteTempFileToDir(dir, pattern string, data []byte, perm os.FileMode) (string, error) {
+	f, err := os.CreateTemp(dir, pattern)
 	if err != nil {
-		return "", errs.Wrap(err, "ioutil.TempFile %s (%s) failed", dir, pattern)
+		return "", errs.Wrap(err, "os.CreateTemp %s (%s) failed", dir, pattern)
 	}
 
 	if _, err = f.Write(data); err != nil {
@@ -675,10 +716,63 @@ func WriteTempFile(dir, pattern string, data []byte, perm os.FileMode) (string, 
 	return f.Name(), nil
 }
 
+type DirReader interface {
+	ReadDir(string) ([]os.DirEntry, error)
+}
+
+func CopyFilesDirReader(reader DirReader, src, dst, placeholderFileName string) error {
+	entries, err := reader.ReadDir(src)
+	if err != nil {
+		return errs.Wrap(err, "reader.ReadDir %s failed", src)
+	}
+
+	for _, entry := range entries {
+		srcPath := filepath.Join(src, entry.Name())
+		destPath := filepath.Join(dst, entry.Name())
+
+		switch entry.Type() & os.ModeType {
+		case os.ModeDir:
+			err := MkdirUnlessExists(destPath)
+			if err != nil {
+				return errs.Wrap(err, "MkdirUnlessExists %s failed", destPath)
+			}
+
+			err = CopyFilesDirReader(reader, srcPath, destPath, placeholderFileName)
+			if err != nil {
+				return errs.Wrap(err, "CopyFiles %s:%s failed", srcPath, destPath)
+			}
+		case os.ModeSymlink:
+			err := CopySymlink(srcPath, destPath)
+			if err != nil {
+				return errs.Wrap(err, "CopySymlink %s:%s failed", srcPath, destPath)
+			}
+		default:
+			if entry.Name() == placeholderFileName {
+				continue
+			}
+
+			err := CopyAsset(srcPath, destPath)
+			if err != nil {
+				return errs.Wrap(err, "CopyFile %s:%s failed", srcPath, destPath)
+			}
+		}
+	}
+
+	return nil
+}
+
 // CopyFiles will copy all of the files/dirs within one directory to another.
 // Both directories must already exist
 func CopyFiles(src, dst string) error {
 	return copyFiles(src, dst, false)
+}
+
+type ErrAlreadyExist struct {
+	Path string
+}
+
+func (e *ErrAlreadyExist) Error() string {
+	return fmt.Sprintf("file already exists: %s", e.Path)
 }
 
 func copyFiles(src, dest string, remove bool) error {
@@ -689,11 +783,12 @@ func copyFiles(src, dest string, remove bool) error {
 		return locale.NewError("err_os_not_a_directory", "", dest)
 	}
 
-	entries, err := ioutil.ReadDir(src)
+	entries, err := os.ReadDir(src)
 	if err != nil {
-		return errs.Wrap(err, "ioutil.ReadDir %s failed", src)
+		return errs.Wrap(err, "os.ReadDir %s failed", src)
 	}
 
+	var errAlreadyExist error
 	for _, entry := range entries {
 		srcPath := filepath.Join(src, entry.Name())
 		destPath := filepath.Join(dest, entry.Name())
@@ -703,15 +798,24 @@ func copyFiles(src, dest string, remove bool) error {
 			return errs.Wrap(err, "os.Lstat %s failed", srcPath)
 		}
 
+		if !fileInfo.IsDir() && TargetExists(destPath) {
+			errAlreadyExist = errs.Pack(errAlreadyExist, &ErrAlreadyExist{destPath})
+			continue
+		}
+
 		switch fileInfo.Mode() & os.ModeType {
 		case os.ModeDir:
 			err := MkdirUnlessExists(destPath)
 			if err != nil {
 				return errs.Wrap(err, "MkdirUnlessExists %s failed", destPath)
 			}
-			err = CopyFiles(srcPath, destPath)
+			err = copyFiles(srcPath, destPath, remove)
 			if err != nil {
-				return errs.Wrap(err, "CopyFiles %s:%s failed", srcPath, destPath)
+				if errors.As(err, ptr.To(&ErrAlreadyExist{})) {
+					errAlreadyExist = errs.Pack(errAlreadyExist, err)
+				} else {
+					return errs.Wrap(err, "CopyFiles %s:%s failed", srcPath, destPath)
+				}
 			}
 		case os.ModeSymlink:
 			err := CopySymlink(srcPath, destPath)
@@ -730,6 +834,12 @@ func copyFiles(src, dest string, remove bool) error {
 		if err := os.RemoveAll(src); err != nil {
 			return errs.Wrap(err, "os.RemovaAll %s failed", src)
 		}
+	}
+
+	// If some files already exist we want to error on this, but only after all other remaining files have been copied.
+	// If ANY other type of error occurs then we don't bubble this up as this is the only error we handle that's non-critical.
+	if errAlreadyExist != nil {
+		return errAlreadyExist
 	}
 
 	return nil
@@ -753,18 +863,37 @@ func CopySymlink(src, dest string) error {
 
 // TempFileUnsafe returns a tempfile handler or panics if it cannot be created
 // This is for use in tests, do not use it outside tests!
-func TempFileUnsafe() *os.File {
-	f, err := ioutil.TempFile("", "")
+func TempFileUnsafe(dir, pattern string) *os.File {
+	f, err := os.CreateTemp(dir, pattern)
 	if err != nil {
 		panic(fmt.Sprintf("Could not create tempFile: %v", err))
 	}
 	return f
 }
 
+func TempFilePath(dir, pattern string) string {
+	if dir == "" {
+		dir = os.TempDir()
+	}
+	fname := random.String(8, random.Alphanumeric)
+	if pattern != "" {
+		fname = fmt.Sprintf("%s-%s", fname, pattern)
+	}
+	return filepath.Join(dir, fname)
+}
+
 // TempDirUnsafe returns a temp path or panics if it cannot be created
 // This is for use in tests, do not use it outside tests!
 func TempDirUnsafe() string {
-	f, err := ioutil.TempDir("", "")
+	f, err := os.MkdirTemp("", "")
+	if err != nil {
+		panic(fmt.Sprintf("Could not create tempDir: %v", err))
+	}
+	return f
+}
+
+func TempDirFromBaseDirUnsafe(baseDir string) string {
+	f, err := os.MkdirTemp(baseDir, "")
 	if err != nil {
 		panic(fmt.Sprintf("Could not create tempDir: %v", err))
 	}
@@ -836,7 +965,6 @@ func LogPath(path string) error {
 func IsDir(path string) bool {
 	info, err := os.Stat(path)
 	if err != nil {
-		logging.Debug("Could not stat path: %s, got error: %v", path, err)
 		return false
 	}
 	return info.IsDir()
@@ -860,6 +988,13 @@ func ResolvePath(path string) (string, error) {
 	}
 
 	return evalPath, nil
+}
+
+func ResolvePathIfPossible(path string) string {
+	if resolvedPath, err := ResolveUniquePath(path); err == nil {
+		return resolvedPath
+	}
+	return path
 }
 
 // PathsEqual checks whether the paths given all resolve to the same path
@@ -941,25 +1076,28 @@ func SymlinkTarget(symlink string) (string, error) {
 
 // ListDirSimple recursively lists filepaths under the given sourcePath
 // This does not follow symlinks
-func ListDirSimple(sourcePath string, includeDirs bool) []string {
+func ListDirSimple(sourcePath string, includeDirs bool) ([]string, error) {
 	result := []string{}
-	filepath.WalkDir(sourcePath, func(path string, f fs.DirEntry, err error) error {
+	err := filepath.WalkDir(sourcePath, func(path string, f fs.DirEntry, err error) error {
 		if err != nil {
 			return errs.Wrap(err, "Could not walk path: %s", path)
 		}
-		if includeDirs == false && f.IsDir() {
+		if !includeDirs && f.IsDir() {
 			return nil
 		}
 		result = append(result, path)
 		return nil
 	})
-	return result
+	if err != nil {
+		return result, errs.Wrap(err, "Could not walk dir: %s", sourcePath)
+	}
+	return result, nil
 }
 
 // ListFilesUnsafe lists filepaths under the given sourcePath non-recursively
 func ListFilesUnsafe(sourcePath string) []string {
 	result := []string{}
-	files, err := ioutil.ReadDir(sourcePath)
+	files, err := os.ReadDir(sourcePath)
 	if err != nil {
 		panic(fmt.Sprintf("Could not read dir: %s, error: %s", sourcePath, errs.JoinMessage(err)))
 	}
@@ -975,7 +1113,7 @@ type DirEntry struct {
 	rootPath     string
 }
 
-func (d DirEntry) Path() string {
+func (d DirEntry) AbsolutePath() string {
 	return d.absolutePath
 }
 
@@ -984,9 +1122,19 @@ func (d DirEntry) RelativePath() string {
 	return strings.TrimPrefix(d.absolutePath, d.rootPath)
 }
 
+type DirEntries []DirEntry
+
+func (d DirEntries) RelativePaths() []string {
+	result := []string{}
+	for _, de := range d {
+		result = append(result, de.RelativePath())
+	}
+	return result
+}
+
 // ListDir recursively lists filepaths under the given sourcePath
 // This does not follow symlinks
-func ListDir(sourcePath string, includeDirs bool) ([]DirEntry, error) {
+func ListDir(sourcePath string, includeDirs bool) (DirEntries, error) {
 	result := []DirEntry{}
 	sourcePath = filepath.Clean(sourcePath)
 	if err := filepath.WalkDir(sourcePath, func(path string, f fs.DirEntry, err error) error {
@@ -996,7 +1144,7 @@ func ListDir(sourcePath string, includeDirs bool) ([]DirEntry, error) {
 		if err != nil {
 			return errs.Wrap(err, "Could not walk path: %s", path)
 		}
-		if includeDirs == false && f.IsDir() {
+		if !includeDirs && f.IsDir() {
 			return nil
 		}
 		result = append(result, DirEntry{f, path, sourcePath + string(filepath.Separator)})
@@ -1099,4 +1247,55 @@ func globPath(path string) string {
 		}
 	}
 	return result
+}
+
+// CommonParentPath will return the common parent path of the given paths, provided they share a common path.
+// If they do not all share a single common path the result will be empty.
+func CommonParentPath(paths []string) string {
+	if len(paths) == 0 {
+		return ""
+	}
+
+	common := paths[0]
+	for _, p := range paths[1:] {
+		common = commonParentPath(common, p)
+		if common == "" {
+			return ""
+		}
+	}
+
+	return common
+}
+
+func commonParentPath(a, b string) (result string) {
+	isWindowsPath := false
+	defer func() {
+		if isWindowsPath {
+			result = posixPathToWindowsPath(result)
+		}
+	}()
+	common := ""
+	ab := windowsPathToPosixPath(a)
+	bb := windowsPathToPosixPath(b)
+	isWindowsPath = a != ab
+	as := strings.Split(ab, "/")
+	bs := strings.Split(bb, "/")
+	max := min(len(as), len(bs))
+	for x := 1; x <= max; x++ {
+		ac := strings.Join(as[:x], "/")
+		bc := strings.Join(bs[:x], "/")
+		if ac != bc {
+			return common
+		}
+		common = ac
+	}
+	return common
+}
+
+func windowsPathToPosixPath(path string) string {
+	return strings.ReplaceAll(path, "\\", "/")
+}
+
+func posixPathToWindowsPath(path string) string {
+	return strings.ReplaceAll(path, "/", "\\")
 }

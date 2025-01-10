@@ -21,13 +21,15 @@ import (
 var ErrMemberNotFound = errs.New("member not found")
 
 // FetchOrganizations fetches all organizations for the current user.
-func FetchOrganizations() ([]*mono_models.Organization, error) {
+func FetchOrganizations(auth *authentication.Auth) ([]*mono_models.Organization, error) {
+	authClient, err := auth.Client()
+	if err != nil {
+		return nil, errs.Wrap(err, "Could not get auth client")
+	}
 	params := clientOrgs.NewListOrganizationsParams()
 	memberOnly := true
-	personal := false
 	params.SetMemberOnly(&memberOnly)
-	params.SetPersonal(&personal)
-	res, err := authentication.Client().Organizations.ListOrganizations(params, authentication.ClientAuth())
+	res, err := authClient.Organizations.ListOrganizations(params, auth.ClientAuth())
 
 	if err != nil {
 		return nil, processOrgErrorResponse(err)
@@ -37,14 +39,14 @@ func FetchOrganizations() ([]*mono_models.Organization, error) {
 }
 
 // FetchOrgByURLName fetches an organization accessible to the current user by it's URL Name.
-func FetchOrgByURLName(urlName string) (*mono_models.Organization, error) {
+func FetchOrgByURLName(urlName string, auth *authentication.Auth) (*mono_models.Organization, error) {
+	authClient, err := auth.Client()
+	if err != nil {
+		return nil, errs.Wrap(err, "Could not get auth client")
+	}
 	params := clientOrgs.NewGetOrganizationParams()
 	params.OrganizationIdentifier = urlName
-	authClient, err := authentication.LegacyGet().ClientSafe()
-	if err != nil {
-		return nil, err
-	}
-	resOk, err := authClient.Organizations.GetOrganization(params, authentication.ClientAuth())
+	resOk, err := authClient.Organizations.GetOrganization(params, auth.ClientAuth())
 	if err != nil {
 		return nil, processOrgErrorResponse(err)
 	}
@@ -52,14 +54,14 @@ func FetchOrgByURLName(urlName string) (*mono_models.Organization, error) {
 }
 
 // FetchOrgMembers fetches the members of an organization accessible to the current user by it's URL Name.
-func FetchOrgMembers(urlName string) ([]*mono_models.Member, error) {
+func FetchOrgMembers(urlName string, auth *authentication.Auth) ([]*mono_models.Member, error) {
+	authClient, err := auth.Client()
+	if err != nil {
+		return nil, errs.Wrap(err, "Could not get auth client")
+	}
 	params := clientOrgs.NewGetOrganizationMembersParams()
 	params.OrganizationName = urlName
-	authClient, err := authentication.LegacyGet().ClientSafe()
-	if err != nil {
-		return nil, err
-	}
-	resOk, err := authClient.Organizations.GetOrganizationMembers(params, authentication.ClientAuth())
+	resOk, err := authClient.Organizations.GetOrganizationMembers(params, auth.ClientAuth())
 	if err != nil {
 		return nil, processOrgErrorResponse(err)
 	}
@@ -67,8 +69,8 @@ func FetchOrgMembers(urlName string) ([]*mono_models.Member, error) {
 }
 
 // FetchOrgMember fetches the member of an organization accessible to the current user by it's URL Name.
-func FetchOrgMember(orgName, name string) (*mono_models.Member, error) {
-	members, err := FetchOrgMembers(orgName)
+func FetchOrgMember(orgName, name string, auth *authentication.Auth) (*mono_models.Member, error) {
+	members, err := FetchOrgMembers(orgName, auth)
 	if err != nil {
 		return nil, err
 	}
@@ -85,11 +87,15 @@ func FetchOrgMember(orgName, name string) (*mono_models.Member, error) {
 // InviteUserToOrg invites a single user (via email address) to a given
 // organization.
 //
-// The invited user can be added as an owner or a member
+// # The invited user can be added as an owner or a member
 //
 // Note: This method only returns the invitation for the new user, not existing
 // users.
-func InviteUserToOrg(orgName string, asOwner bool, email string) (*mono_models.Invitation, error) {
+func InviteUserToOrg(orgName string, asOwner bool, email string, auth *authentication.Auth) (*mono_models.Invitation, error) {
+	authClient, err := auth.Client()
+	if err != nil {
+		return nil, errs.Wrap(err, "Could not get auth client")
+	}
 	params := clientOrgs.NewInviteOrganizationParams()
 	role := mono_models.RoleReader
 	if asOwner {
@@ -102,7 +108,7 @@ func InviteUserToOrg(orgName string, asOwner bool, email string) (*mono_models.I
 	params.SetOrganizationName(orgName)
 	params.SetAttributes(body)
 	params.SetEmail(email)
-	resOk, err := authentication.Client().Organizations.InviteOrganization(params, authentication.ClientAuth())
+	resOk, err := authClient.Organizations.InviteOrganization(params, auth.ClientAuth())
 	if err != nil {
 		return nil, processInviteErrorResponse(err)
 	}
@@ -114,30 +120,30 @@ func InviteUserToOrg(orgName string, asOwner bool, email string) (*mono_models.I
 }
 
 // FetchOrganizationsByIDs fetches organizations by their IDs
-func FetchOrganizationsByIDs(ids []strfmt.UUID) ([]model.Organization, error) {
+func FetchOrganizationsByIDs(ids []strfmt.UUID, auth *authentication.Auth) ([]model.Organization, error) {
 	ids = funk.Uniq(ids).([]strfmt.UUID)
 	request := request.OrganizationsByIDs(ids)
 
-	gql := graphql.New()
-	response := model.Organizations{}
+	gql := graphql.New(auth)
+	response := []model.Organization{}
 	err := gql.Run(request, &response)
 	if err != nil {
 		return nil, errs.Wrap(err, "gql.Run failed")
 	}
 
-	if len(response.Organizations) != len(ids) {
-		logging.Debug("Organization membership mismatch: %d members returned for %d members requested. Caller must account for this.", len(response.Organizations), len(ids))
+	if len(response) != len(ids) {
+		logging.Debug("Organization membership mismatch: %d members returned for %d members requested. Caller must account for this.", len(response), len(ids))
 	}
 
-	return response.Organizations, nil
+	return response, nil
 }
 
 func processOrgErrorResponse(err error) error {
 	switch statusCode := api.ErrorCode(err); statusCode {
 	case 401:
-		return locale.NewInputError("err_api_not_authenticated")
+		return locale.NewExternalError("err_api_not_authenticated")
 	case 404:
-		return locale.NewInputError("err_api_org_not_found")
+		return locale.NewExternalError("err_api_org_not_found")
 	default:
 		return err
 	}
@@ -146,11 +152,11 @@ func processOrgErrorResponse(err error) error {
 func processInviteErrorResponse(err error) error {
 	switch statusCode := api.ErrorCode(err); statusCode {
 	case 400:
-		return locale.WrapInputError(err, "err_api_invite_400", "Invalid request, did you enter a valid email address?")
+		return locale.WrapExternalError(err, "err_api_invite_400", "Invalid request. Did you enter a valid email address?")
 	case 401:
-		return locale.NewInputError("err_api_not_authenticated")
+		return locale.NewExternalError("err_api_not_authenticated")
 	case 404:
-		return locale.NewInputError("err_api_org_not_found")
+		return locale.NewExternalError("err_api_org_not_found")
 	default:
 		return locale.WrapError(err, api.ErrorMessageFromPayload(err))
 	}

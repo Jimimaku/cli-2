@@ -3,15 +3,14 @@ package state
 import (
 	"time"
 
+	"github.com/ActiveState/cli/internal/analytics"
 	"github.com/ActiveState/cli/internal/config"
 	"github.com/ActiveState/cli/internal/constants"
+	"github.com/ActiveState/cli/internal/installation"
 	"github.com/ActiveState/cli/internal/locale"
-	"github.com/ActiveState/cli/internal/logging"
 	"github.com/ActiveState/cli/internal/output"
 	"github.com/ActiveState/cli/internal/primer"
 	"github.com/ActiveState/cli/internal/profile"
-	"github.com/ActiveState/cli/internal/installation"
-	"github.com/ActiveState/cli/pkg/cmdlets/checker"
 	"github.com/ActiveState/cli/pkg/platform/model"
 )
 
@@ -30,12 +29,14 @@ type State struct {
 	out    output.Outputer
 	cfg    *config.Instance
 	svcMdl *model.SvcModel
+	an     analytics.Dispatcher
 }
 
 type primeable interface {
 	primer.Outputer
 	primer.Configurer
 	primer.SvcModeler
+	primer.Analyticer
 }
 
 func New(opts *Options, prime primeable) *State {
@@ -44,32 +45,24 @@ func New(opts *Options, prime primeable) *State {
 		out:    prime.Output(),
 		cfg:    prime.Config(),
 		svcMdl: prime.SvcModel(),
+		an:     prime.Analytics(),
 	}
 }
 
-// Run state logic
 func (s *State) Run(usageFunc func() error) error {
-	return execute(s.opts, usageFunc, s.cfg, s.svcMdl, s.out)
-}
+	defer profile.Measure("runners:state:run", time.Now())
 
-func execute(opts *Options, usageFunc func() error, cfg *config.Instance, svcModel *model.SvcModel, out output.Outputer) error {
-	logging.Debug("Execute")
-	defer profile.Measure("runners:state:execute", time.Now())
-
-	if opts.Version {
-		checker.RunUpdateNotifier(svcModel, out)
+	if s.opts.Version {
 		vd := installation.VersionData{
+			"CLI",
 			constants.LibraryLicense,
 			constants.Version,
-			constants.BranchName,
+			constants.ChannelName,
 			constants.RevisionHash,
 			constants.Date,
 			constants.OnCI == "true",
 		}
-		out.Print(
-			output.NewFormatter(vd).
-				WithFormat(output.PlainFormatName, locale.T("version_info", vd)),
-		)
+		s.out.Print(output.Prepare(locale.T("version_info", vd), vd))
 		return nil
 	}
 	return usageFunc()

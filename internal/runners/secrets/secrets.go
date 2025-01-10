@@ -4,15 +4,18 @@ import (
 	"fmt"
 
 	"github.com/ActiveState/cli/internal/access"
+	"github.com/ActiveState/cli/internal/errs"
 	"github.com/ActiveState/cli/internal/keypairs"
 	"github.com/ActiveState/cli/internal/locale"
 	"github.com/ActiveState/cli/internal/logging"
 	"github.com/ActiveState/cli/internal/multilog"
 	"github.com/ActiveState/cli/internal/output"
 	"github.com/ActiveState/cli/internal/primer"
+	"github.com/ActiveState/cli/internal/runbits/rationalize"
 	"github.com/ActiveState/cli/internal/secrets"
 	secretsapi "github.com/ActiveState/cli/pkg/platform/api/secrets"
 	secretsModels "github.com/ActiveState/cli/pkg/platform/api/secrets/secrets_models"
+	"github.com/ActiveState/cli/pkg/platform/authentication"
 	"github.com/ActiveState/cli/pkg/project"
 )
 
@@ -20,6 +23,7 @@ type listPrimeable interface {
 	primer.Outputer
 	primer.Projecter
 	primer.Configurer
+	primer.Auther
 }
 
 // ListRunParams tracks the info required for running List.
@@ -33,6 +37,7 @@ type List struct {
 	out           output.Outputer
 	proj          *project.Project
 	cfg           keypairs.Configurable
+	auth          *authentication.Auth
 }
 
 type secretData struct {
@@ -43,11 +48,6 @@ type secretData struct {
 	Usage       string `locale:"usage,[HEADING]Usage[/RESET]"`
 }
 
-type listOutput struct {
-	out  output.Outputer
-	data []*secretData
-}
-
 // NewList prepares a list execution context for use.
 func NewList(client *secretsapi.Client, p listPrimeable) *List {
 	return &List{
@@ -55,70 +55,74 @@ func NewList(client *secretsapi.Client, p listPrimeable) *List {
 		out:           p.Output(),
 		proj:          p.Project(),
 		cfg:           p.Config(),
+		auth:          p.Auth(),
 	}
+}
+
+type listOutput struct {
+	out  output.Outputer
+	data []*secretData
+}
+
+func (o *listOutput) MarshalOutput(format output.Format) interface{} {
+	return struct {
+		Data []*secretData `opts:"verticalTable" locale:","`
+	}{
+		o.data,
+	}
+}
+
+func (o *listOutput) MarshalStructured(format output.Format) interface{} {
+	output := make([]*SecretExport, len(o.data))
+	for i, d := range o.data {
+		out := &SecretExport{
+			Name:        d.Name,
+			Scope:       d.Scope,
+			Description: d.Description,
+		}
+
+		if d.HasValue == locale.T("secrets_row_value_set") {
+			out.HasValue = true
+		}
+
+		output[i] = out
+	}
+	return output
 }
 
 // Run executes the list behavior.
 func (l *List) Run(params ListRunParams) error {
 	if l.proj == nil {
-		return locale.NewInputError("err_no_project")
+		return rationalize.ErrNoProject
 	}
-	if err := checkSecretsAccess(l.proj); err != nil {
+	l.out.Notice(locale.Tr("operating_message", l.proj.NamespaceString(), l.proj.Dir()))
+
+	if err := checkSecretsAccess(l.proj, l.auth); err != nil {
 		return locale.WrapError(err, "secrets_err_check_access")
 	}
 
-	defs, err := definedSecrets(l.proj, l.secretsClient, l.cfg, params.Filter)
+	defs, err := definedSecrets(l.proj, l.secretsClient, l.cfg, l.auth, params.Filter)
 	if err != nil {
 		return locale.WrapError(err, "secrets_err_defined")
 	}
 
-	meta, err := defsToData(defs, l.cfg, l.proj)
+	meta, err := defsToData(defs, l.cfg, l.proj, l.auth)
 	if err != nil {
 		return locale.WrapError(err, "secrets_err_values")
 	}
 
-	data := &listOutput{l.out, meta}
-	l.out.Print(data)
+	l.out.Print(&listOutput{l.out, meta})
 
 	return nil
 }
 
-func (l *listOutput) MarshalOutput(format output.Format) interface{} {
-	switch format {
-	case output.EditorV0FormatName:
-		var output []*SecretExport
-		for _, d := range l.data {
-			out := &SecretExport{
-				Name:        d.Name,
-				Scope:       d.Scope,
-				Description: d.Description,
-			}
-
-			if d.HasValue == locale.T("secrets_row_value_set") {
-				out.HasValue = true
-			}
-
-			output = append(output, out)
-		}
-		l.out.Print(output)
-	default:
-		l.out.Print(struct {
-			Data []*secretData `opts:"verticalTable" locale:","`
-		}{
-			l.data,
-		})
-	}
-
-	return output.Suppress
-}
-
 // checkSecretsAccess is reusable "runner-level" logic and provides a directly
 // usable localized error.
-func checkSecretsAccess(proj *project.Project) error {
+func checkSecretsAccess(proj *project.Project, auth *authentication.Auth) error {
 	if proj == nil {
-		return locale.NewInputError("err_no_project")
+		return rationalize.ErrNoProject
 	}
-	allowed, err := access.Secrets(proj.Owner())
+	allowed, err := access.Secrets(proj.Owner(), auth)
 	if err != nil {
 		return locale.WrapError(err, "secrets_err_access")
 	}
@@ -128,7 +132,7 @@ func checkSecretsAccess(proj *project.Project) error {
 	return nil
 }
 
-func definedSecrets(proj *project.Project, secCli *secretsapi.Client, cfg keypairs.Configurable, filter string) ([]*secretsModels.SecretDefinition, error) {
+func definedSecrets(proj *project.Project, secCli *secretsapi.Client, cfg keypairs.Configurable, auth *authentication.Auth, filter string) ([]*secretsModels.SecretDefinition, error) {
 	logging.Debug("listing variables for org=%s, project=%s", proj.Owner(), proj.Name())
 
 	secretDefs, err := secrets.DefsByProject(secCli, proj.Owner(), proj.Name())
@@ -137,25 +141,41 @@ func definedSecrets(proj *project.Project, secCli *secretsapi.Client, cfg keypai
 	}
 
 	if filter != "" {
-		secretDefs = filterSecrets(proj, cfg, secretDefs, filter)
+		secretDefs, err = filterSecrets(proj, cfg, auth, secretDefs, filter)
+		if err != nil {
+			return nil, errs.Wrap(err, "Could not filter secrets")
+		}
 	}
 
 	return secretDefs, nil
 }
 
-func filterSecrets(proj *project.Project, cfg keypairs.Configurable, secrectDefs []*secretsModels.SecretDefinition, filter string) []*secretsModels.SecretDefinition {
+func filterSecrets(proj *project.Project, cfg keypairs.Configurable, auth *authentication.Auth, secrectDefs []*secretsModels.SecretDefinition, filter string) (defs []*secretsModels.SecretDefinition, rerr error) {
 	secrectDefsFiltered := []*secretsModels.SecretDefinition{}
 
 	oldExpander := project.RegisteredExpander("secrets")
 	if oldExpander != nil {
-		defer project.RegisterExpander("secrets", oldExpander)
+		defer func() {
+			err := project.RegisterExpander("secrets", oldExpander)
+			if err != nil {
+				rerr = errs.Pack(rerr, errs.Wrap(err, "Could not register old secrets expander"))
+			}
+		}()
 	}
-	expander := project.NewSecretExpander(secretsapi.Get(), proj, nil, cfg)
-	project.RegisterExpander("secrets", expander.Expand)
-	project.ExpandFromProject(fmt.Sprintf("$%s", filter), proj)
+	expander := project.NewSecretExpander(secretsapi.Get(auth), proj, nil, cfg, auth)
+	err := project.RegisterExpander("secrets", expander.Expand)
+	if err != nil {
+		return nil, errs.Wrap(err, "Could not register secrets expander")
+	}
+
+	_, err = project.ExpandFromProject(fmt.Sprintf("$%s", filter), proj)
+	if err != nil {
+		return nil, errs.Wrap(err, "Could not expand filter")
+	}
+
 	accessedSecrets := expander.SecretsAccessed()
 	if accessedSecrets == nil {
-		return secrectDefsFiltered
+		return secrectDefsFiltered, nil
 	}
 
 	for _, secretDef := range secrectDefs {
@@ -167,12 +187,12 @@ func filterSecrets(proj *project.Project, cfg keypairs.Configurable, secrectDefs
 		}
 	}
 
-	return secrectDefsFiltered
+	return secrectDefsFiltered, nil
 }
 
-func defsToData(defs []*secretsModels.SecretDefinition, cfg keypairs.Configurable, proj *project.Project) ([]*secretData, error) {
+func defsToData(defs []*secretsModels.SecretDefinition, cfg keypairs.Configurable, proj *project.Project, auth *authentication.Auth) ([]*secretData, error) {
 	data := make([]*secretData, len(defs))
-	expander := project.NewSecretExpander(secretsapi.Get(), proj, nil, cfg)
+	expander := project.NewSecretExpander(secretsapi.Get(auth), proj, nil, cfg, auth)
 
 	for i, def := range defs {
 		if def.Name == nil || def.Scope == nil {

@@ -1,53 +1,121 @@
 type Version {
-  state: StateVersion!
+    state: StateVersion!
 }
 
 type StateVersion {
-  license: String!
-  version: String!
-  branch: String!
-  revision: String!
-  date: String!
+    license: String!
+    version: String!
+    channel: String!
+    revision: String!
+    date: String!
 }
 
 type AvailableUpdate {
-  version: String!
-  channel: String!
-  path: String!
-  platform: String!
-  sha256: String!
+    version: String!
+    channel: String!
+    path: String!
+    platform: String!
+    sha256: String!
 }
 
 type Project {
-  namespace: String!
-  locations: [String!]!
+    namespace: String!
+    locations: [String!]!
 }
 
 type AnalyticsEventResponse {
-  sent: Boolean!
+    sent: Boolean!
 }
 
-type RuntimeUsageResponse {
-  received: Boolean!
+type ReportRuntimeUsageResponse {
+    received: Boolean!
 }
 
-type DeprecationInfo {
-  version: String!
-  date: String!
-  dateReached: Boolean!
-  reason: String!
+enum NotificationRepeatType {
+    Disabled
+    Constantly
+    Hourly
+    Daily
+    Weekly
+    Monthly
+}
+
+enum NotificationInterruptType {
+    Disabled
+    Prompt
+    Exit
+}
+
+enum NotificationPlacementType {
+    BeforeCmd
+    AfterCmd
+}
+
+type NotificationInfo {
+    id: String!
+    message: String!
+    condition: String!
+    startDate: String!
+    endDate: String!
+    repeat: NotificationRepeatType!
+    interrupt: NotificationInterruptType!
+    placement: NotificationPlacementType!
+}
+
+type Organization {
+    URLname: String!
+    role: String!
+}
+
+type User {
+    userID: String!
+    username: String!
+    email: String!
+    organizations: [Organization!]!
+}
+
+type JWT {
+    token: String!
+    user: User!
+}
+
+type GlobFileResult {
+    pattern: String!
+    path: String!
+    hash: String!
+}
+
+type GlobResult {
+    files: [GlobFileResult!]!
+    hash: String!
 }
 
 type Query {
-  version: Version
-  availableUpdate: AvailableUpdate
-  projects: [Project]!
-  analyticsEvent(category: String!, action: String!, label: String, dimensionsJson: String!): AnalyticsEventResponse
-  runtimeUsage(pid: Int!, exec: String!, dimensionsJson: String!): RuntimeUsageResponse
-  checkDeprecation: DeprecationInfo
-  configChanged(key: String!): ConfigChangedResponse
+    version: Version
+    availableUpdate(desiredChannel: String!, desiredVersion: String!): AvailableUpdate
+    projects: [Project]!
+    analyticsEvent(category: String!, action: String!, source: String!, label: String, dimensionsJson: String!): AnalyticsEventResponse
+    reportRuntimeUsage(pid: Int!, exec: String!, source: String!, dimensionsJson: String!): ReportRuntimeUsageResponse
+    checkNotifications(command: String!, flags: [String!]!): [NotificationInfo!]!
+    configChanged(key: String!): ConfigChangedResponse
+    fetchLogTail: String!
+    getProcessesInUse(execDir: String!): [ProcessInfo!]!
+    getJWT: JWT
+    hashGlobs(wd: String!, globs: [String!]!): GlobResult!
+    getCache(key: String!): String!
+}
+
+type Mutation {
+    setCache(key: String!, value: String!, expiry: Int!): Void
 }
 
 type ConfigChangedResponse {
-  received: Boolean!
+    received: Boolean!
 }
+
+type ProcessInfo {
+    exe: String!
+    pid: Int!
+}
+
+scalar Void

@@ -1,9 +1,12 @@
+//go:build !windows
 // +build !windows
 
 package colorstyle
 
 import (
 	"io"
+
+	"github.com/ActiveState/cli/internal/logging"
 )
 
 type Styler struct {
@@ -25,6 +28,7 @@ var ansiStyleMap = map[Style]string{
 	Magenta:   "\x1b[35",
 	Cyan:      "\x1b[36",
 	White:     "\x1b[37",
+	Orange:    "\x1b[38;5;208",
 }
 
 func New(writer io.Writer) *Styler {
@@ -36,5 +40,8 @@ func (w *Styler) SetStyle(s Style, bright bool) {
 	if bright {
 		resolvedStyle = resolvedStyle + ";1"
 	}
-	w.writer.Write([]byte(resolvedStyle + "m"))
+	_, err := w.writer.Write([]byte(resolvedStyle + "m"))
+	if err != nil {
+		logging.Error("Error writing to writer: %v", err)
+	}
 }

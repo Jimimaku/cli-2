@@ -15,11 +15,11 @@ import (
 type ErrKeypairNotFound struct{ *locale.LocalizedError }
 
 // FetchRaw fetchs the current user keypair or returns a failure.
-func FetchRaw(secretsClient *secretsapi.Client, cfg authentication.Configurable) (*secretModels.Keypair, error) {
-	kpOk, err := secretsClient.Keys.GetKeypair(nil, authentication.LegacyGet().ClientAuth())
+func FetchRaw(secretsClient *secretsapi.Client, cfg authentication.Configurable, auth *authentication.Auth) (*secretModels.Keypair, error) {
+	kpOk, err := secretsClient.Keys.GetKeypair(nil, auth.ClientAuth())
 	if err != nil {
 		if api.ErrorCode(err) == 404 {
-			return nil, &ErrKeypairNotFound{locale.WrapInputError(err, "keypair_err_not_found")}
+			return nil, &ErrKeypairNotFound{locale.WrapExternalError(err, "keypair_err_not_found")}
 		}
 		multilog.Error("Error when fetching keypair: %v", api.ErrorMessageFromPayload(err))
 		return nil, errs.Wrap(err, "GetKeypair failed")
@@ -28,29 +28,14 @@ func FetchRaw(secretsClient *secretsapi.Client, cfg authentication.Configurable)
 	return kpOk.Payload, nil
 }
 
-// Fetch fetchs and parses the current user's keypair using the provided passphrase or returns a failure.
-func Fetch(secretsClient *secretsapi.Client, cfg authentication.Configurable, passphrase string) (Keypair, error) {
-	rawKP, err := FetchRaw(secretsClient, cfg)
-	if err != nil {
-		return nil, err
-	}
-
-	kp, err := ParseEncryptedRSA(*rawKP.EncryptedPrivateKey, passphrase)
-	if err != nil {
-		return nil, err
-	}
-
-	return kp, nil
-}
-
 // FetchPublicKey fetchs the PublicKey for a sepcific user.
-func FetchPublicKey(secretsClient *secretsapi.Client, user *mono_models.User) (Encrypter, error) {
+func FetchPublicKey(secretsClient *secretsapi.Client, user *mono_models.User, auth *authentication.Auth) (Encrypter, error) {
 	params := keys.NewGetPublicKeyParams()
 	params.UserID = user.UserID
-	pubKeyOk, err := secretsClient.Keys.GetPublicKey(params, authentication.LegacyGet().ClientAuth())
+	pubKeyOk, err := secretsClient.Keys.GetPublicKey(params, auth.ClientAuth())
 	if err != nil {
 		if api.ErrorCode(err) == 404 {
-			return nil, &ErrKeypairNotFound{locale.WrapInputError(err, "keypair_err_publickey_not_found", "", user.Username, user.UserID.String())}
+			return nil, &ErrKeypairNotFound{locale.WrapExternalError(err, "keypair_err_publickey_not_found", "", user.Username, user.UserID.String())}
 		}
 		return nil, errs.Wrap(err, "GetPublicKey failed")
 	}

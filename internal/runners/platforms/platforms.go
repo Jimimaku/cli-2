@@ -4,23 +4,24 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"time"
 
+	"github.com/ActiveState/cli/pkg/sysinfo"
 	"github.com/go-openapi/strfmt"
 
 	"github.com/ActiveState/cli/internal/captain"
 	"github.com/ActiveState/cli/internal/locale"
-	"github.com/ActiveState/cli/internal/output"
 	"github.com/ActiveState/cli/pkg/platform/model"
 )
 
 type PlatformVersion struct {
-	captain.NameVersion
+	captain.NameVersionValue
 }
 
 func (pv *PlatformVersion) Set(arg string) error {
-	err := pv.NameVersion.Set(arg)
+	err := pv.NameVersionValue.Set(arg)
 	if err != nil {
-		return locale.WrapInputError(err, "err_platform_format", "The platform and version provided is not formatting correctly, must be in the form of <platform>@<version>")
+		return locale.WrapInputError(err, "err_platform_format", "The platform and version provided is not formatting correctly. It must be in the form of <platform>@<version>")
 	}
 	return nil
 }
@@ -32,21 +33,14 @@ type Platform struct {
 	BitWidth string `json:"bitWidth"`
 }
 
-func (l *Listing) MarshalOutput(format output.Format) interface{} {
-	if format == output.PlainFormatName {
-		if len(l.Platforms) == 0 {
-			return locale.Tl("platforms_list_no_platforms", "There are no platforms for this project.")
-		}
-		return l.Platforms
-	}
-
-	return l.Platforms
-}
-
 func makePlatformsFromModelPlatforms(platforms []*model.Platform) []*Platform {
 	var ps []*Platform
 
 	for _, platform := range platforms {
+		if platform.EndOfSupportDate != nil && time.Since(time.Time(*platform.EndOfSupportDate)) > 0 {
+			continue // ignore EOL platforms; the Platform will fail to resolve dependencies on them
+		}
+
 		var p Platform
 		if platform.Kernel != nil && platform.Kernel.Name != nil {
 			p.Name = *platform.Kernel.Name
@@ -72,19 +66,19 @@ func makePlatformsFromModelPlatforms(platforms []*model.Platform) []*Platform {
 
 // Params represents the minimal defining details of a platform.
 type Params struct {
-	Platform PlatformVersion
-	BitWidth int
-	name     string
-	version  string
+	Platform        PlatformVersion
+	BitWidth        int
+	resolvedName    string // Holds the provided platforn name, or defaults to curernt platform name if not provided
+	resolvedVersion string // Holds the provided platform version, or defaults to latest version if not provided
 }
 
 func prepareParams(ps Params) (Params, error) {
-	ps.name = ps.Platform.Name()
-	if ps.name == "" {
-		ps.name = model.HostPlatform
+	ps.resolvedName = ps.Platform.Name()
+	if ps.resolvedName == "" {
+		ps.resolvedName = sysinfo.OS().String()
 	}
-	ps.version = ps.Platform.Version()
-	if ps.version == "" {
+	ps.resolvedVersion = ps.Platform.Version()
+	if ps.resolvedVersion == "" {
 		return prepareLatestVersion(ps)
 	}
 
@@ -98,15 +92,15 @@ func prepareParams(ps Params) (Params, error) {
 func prepareLatestVersion(params Params) (Params, error) {
 	platformUUID, err := model.PlatformNameToPlatformID(params.Platform.Name())
 	if err != nil {
-		return params, locale.WrapInputError(err, "err_resolve_platform_id", "Could not resolve platform ID from name: {{.V0}}", params.Platform.Name())
+		return params, locale.WrapExternalError(err, "err_resolve_platform_id", "Could not resolve platform ID from name: {{.V0}}", params.Platform.Name())
 	}
 
 	platform, err := model.FetchPlatformByUID(strfmt.UUID(platformUUID))
 	if err != nil {
 		return params, locale.WrapError(err, "err_fetch_platform", "Could not get platform details")
 	}
-	params.name = *platform.Kernel.Name
-	params.version = *platform.KernelVersion.Version
+	params.resolvedName = *platform.Kernel.Name
+	params.resolvedVersion = *platform.KernelVersion.Version
 
 	bitWidth, err := strconv.Atoi(*platform.CPUArchitecture.BitWidth)
 	if err != nil {

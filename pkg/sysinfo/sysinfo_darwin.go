@@ -23,7 +23,7 @@ func OS() OsInfo {
 }
 
 var (
-	plistVersionRegex = regexp.MustCompile("(?s)ProductVersion.*?([\\d\\.]+)")
+	plistVersionRegex = regexp.MustCompile(`(?s)ProductVersion.*?([\d\.]+)`)
 )
 
 // OSVersion returns the system's OS version.
@@ -53,6 +53,10 @@ func OSVersion() (*OSVersionInfo, error) {
 
 	// Fetch OS name.
 	name, err := exec.Command("sw_vers", "-productName").Output()
+	if err != nil {
+		return nil, fmt.Errorf("Unable to fetch OS name: %s", err)
+	}
+
 	info := &OSVersionInfo{vInfo, string(name)}
 	sysinfoCache.Set(osVersionInfoCacheKey, info, cache.NoExpiration)
 	return info, nil
@@ -68,7 +72,7 @@ func Libc() (*LibcInfo, error) {
 	if err != nil {
 		return nil, fmt.Errorf("Unable to fetch libc version: %s", err)
 	}
-	regex := regexp.MustCompile("(\\d+)\\D(\\d+)")
+	regex := regexp.MustCompile(`(\d+)\D(\d+)`)
 	parts := regex.FindStringSubmatch(string(version))
 	if len(parts) != 3 {
 		return nil, fmt.Errorf("Unable to parse libc string '%s'", version)
@@ -120,7 +124,7 @@ func getDarwinProductVersion() (string, error) {
 
 	version, err := exec.Command("sw_vers", "-productVersion").Output()
 	if err != nil {
-		return "", locale.WrapError(err, "Could not detect your OS version, error received: %s", err.Error())
+		return "", locale.WrapError(err, "Could not detect your OS version. Error received: %s", err.Error())
 	}
 	return string(bytes.TrimSpace(version)), nil
 }

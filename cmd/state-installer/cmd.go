@@ -12,12 +12,12 @@ import (
 
 	"github.com/ActiveState/cli/internal/analytics"
 	"github.com/ActiveState/cli/internal/analytics/client/sync"
+	anaConst "github.com/ActiveState/cli/internal/analytics/constants"
 	"github.com/ActiveState/cli/internal/captain"
 	"github.com/ActiveState/cli/internal/config"
 	"github.com/ActiveState/cli/internal/constants"
 	"github.com/ActiveState/cli/internal/errs"
 	"github.com/ActiveState/cli/internal/events"
-	"github.com/ActiveState/cli/internal/exeutils"
 	"github.com/ActiveState/cli/internal/fileutils"
 	"github.com/ActiveState/cli/internal/installation"
 	"github.com/ActiveState/cli/internal/installation/storage"
@@ -28,17 +28,14 @@ import (
 	"github.com/ActiveState/cli/internal/output"
 	"github.com/ActiveState/cli/internal/primer"
 	"github.com/ActiveState/cli/internal/rollbar"
+	"github.com/ActiveState/cli/internal/runbits/errors"
 	"github.com/ActiveState/cli/internal/runbits/panics"
 	"github.com/ActiveState/cli/internal/subshell"
 	"github.com/ActiveState/cli/internal/subshell/bash"
-	"github.com/ActiveState/cli/pkg/cmdlets/errors"
 	"github.com/ActiveState/cli/pkg/project"
 	"github.com/ActiveState/cli/pkg/sysinfo"
-	"golang.org/x/crypto/ssh/terminal"
+	"golang.org/x/term"
 )
-
-const AnalyticsCat = "installer"
-const AnalyticsFunnelCat = "installer-funnel"
 
 type Params struct {
 	sourceInstaller string
@@ -49,10 +46,16 @@ type Params struct {
 	isUpdate        bool
 	activate        *project.Namespaced
 	activateDefault *project.Namespaced
+	showVersion     bool
+	nonInteractive  bool
 }
 
 func newParams() *Params {
-	return &Params{activate: &project.Namespaced{}, activateDefault: &project.Namespaced{}}
+	return &Params{
+		activate:        &project.Namespaced{},
+		activateDefault: &project.Namespaced{},
+		nonInteractive:  !term.IsTerminal(int(os.Stdin.Fd())),
+	}
 }
 
 func main() {
@@ -90,7 +93,7 @@ func main() {
 	var err error
 	cfg, err = config.New()
 	if err != nil {
-		multilog.Error("Could not set up configuration handler: " + errs.JoinMessage(err))
+		multilog.Critical("Could not set up configuration handler: " + errs.JoinMessage(err))
 		fmt.Fprintln(os.Stderr, err.Error())
 		exitCode = 1
 	}
@@ -102,16 +105,15 @@ func main() {
 		OutWriter:   os.Stdout,
 		ErrWriter:   os.Stderr,
 		Colored:     true,
-		Interactive: false,
+		Interactive: term.IsTerminal(int(os.Stdin.Fd())),
 	})
 	if err != nil {
-		multilog.Error("Could not set up output handler: " + errs.JoinMessage(err))
+		multilog.Critical("Could not set up output handler: " + errs.JoinMessage(err))
 		fmt.Fprintln(os.Stderr, err.Error())
 		exitCode = 1
 		return
 	}
 
-	var garbageBool bool
 	var garbageString string
 
 	// We have old install one liners around that use `-activate` instead of `--activate`
@@ -125,15 +127,28 @@ func main() {
 	logging.Debug("Original Args: %v", os.Args)
 	logging.Debug("Processed Args: %v", processedArgs)
 
-	an = sync.New(cfg, nil)
-	an.Event(AnalyticsFunnelCat, "start")
+	// Store sessionToken to config
+	for _, envVar := range []string{constants.OverrideSessionTokenEnvVarName, constants.SessionTokenEnvVarName} {
+		sessionToken, ok := os.LookupEnv(envVar)
+		if !ok {
+			continue
+		}
+		err := cfg.Set(anaConst.CfgSessionToken, sessionToken)
+		if err != nil {
+			multilog.Error("Unable to set session token: " + errs.JoinMessage(err))
+		}
+		break
+	}
+
+	an = sync.New(anaConst.SrcStateInstaller, cfg, nil, out)
+	an.Event(anaConst.CatInstallerFunnel, "start")
 
 	params := newParams()
 	cmd := captain.NewCommand(
 		"state-installer",
 		"",
 		"Installs or updates the State Tool",
-		primer.New(nil, out, nil, nil, nil, nil, cfg, nil, nil, an),
+		primer.New(out, cfg, an),
 		[]*captain.Flag{ // The naming of these flags is slightly inconsistent due to backwards compatibility requirements
 			{
 				Name:        "command",
@@ -165,7 +180,7 @@ func main() {
 			},
 			{
 				Name:   "source-installer",
-				Hidden: true, // This is internally routed in via the install frontend (eg. install.sh, MSI, etc)
+				Hidden: true, // This is internally routed in via the install frontend (eg. install.sh, etc)
 				Value:  &params.sourceInstaller,
 			},
 			{
@@ -174,8 +189,12 @@ func main() {
 				Hidden:    true, // Since we already expose the path as an argument, let's not confuse the user
 				Value:     &params.path,
 			},
+			{
+				Name:  "version", // note: no shorthand because install.sh uses -v for selecting version
+				Value: &params.showVersion,
+			},
+			{Name: "non-interactive", Shorthand: "n", Hidden: true, Value: &params.nonInteractive}, // don't prompt
 			// The remaining flags are for backwards compatibility (ie. we don't want to error out when they're provided)
-			{Name: "nnn", Shorthand: "n", Hidden: true, Value: &garbageBool}, // don't prompt; useless cause we don't prompt anyway
 			{Name: "channel", Hidden: true, Value: &garbageString},
 			{Name: "bbb", Shorthand: "b", Hidden: true, Value: &garbageString},
 			{Name: "vvv", Shorthand: "v", Hidden: true, Value: &garbageString},
@@ -193,41 +212,57 @@ func main() {
 		},
 	)
 
-	an.Event(AnalyticsFunnelCat, "pre-exec")
+	an.Event(anaConst.CatInstallerFunnel, "pre-exec")
 	err = cmd.Execute(processedArgs[1:])
 	if err != nil {
 		errors.ReportError(err, cmd, an)
 		if locale.IsInputError(err) {
-			an.EventWithLabel(AnalyticsCat, "input-error", errs.JoinMessage(err))
+			an.EventWithLabel(anaConst.CatInstaller, "input-error", errs.JoinMessage(err))
 			logging.Debug("Installer input error: " + errs.JoinMessage(err))
 		} else {
-			an.EventWithLabel(AnalyticsCat, "error", errs.JoinMessage(err))
+			an.EventWithLabel(anaConst.CatInstaller, "error", errs.JoinMessage(err))
 			multilog.Critical("Installer error: " + errs.JoinMessage(err))
 		}
 
-		an.EventWithLabel(AnalyticsFunnelCat, "fail", errs.JoinMessage(err))
-		exitCode, err = errors.Unwrap(err)
+		an.EventWithLabel(anaConst.CatInstallerFunnel, "fail", errs.JoinMessage(err))
+		exitCode, err = errors.ParseUserFacing(err)
 		if err != nil {
 			out.Error(err)
 		}
 	} else {
-		an.Event(AnalyticsFunnelCat, "success")
+		an.Event(anaConst.CatInstallerFunnel, "success")
 	}
 }
 
 func execute(out output.Outputer, cfg *config.Instance, an analytics.Dispatcher, args []string, params *Params) error {
-	an.Event(AnalyticsFunnelCat, "exec")
+	if params.showVersion {
+		vd := installation.VersionData{
+			"CLI Installer",
+			constants.LibraryLicense,
+			constants.Version,
+			constants.ChannelName,
+			constants.RevisionHash,
+			constants.Date,
+			constants.OnCI == "true",
+		}
+		out.Print(locale.T("version_info", vd))
+		return nil
+	}
+
+	an.Event(anaConst.CatInstallerFunnel, "exec")
+
+	usingDefaultInstallPath := params.path == ""
 
 	if params.path == "" {
 		var err error
-		params.path, err = installation.InstallPathForBranch(constants.BranchName)
+		params.path, err = installation.InstallPathForChannel(constants.ChannelName)
 		if err != nil {
 			return errs.Wrap(err, "Could not detect installation path.")
 		}
 	}
 
 	// Detect installed state tool
-	stateToolInstalled, installPath, stateExePath, err := installedOnPath(params.path, constants.BranchName)
+	stateToolInstalled, installPath, err := installedOnPath(params.path, constants.ChannelName)
 	if err != nil {
 		return errs.Wrap(err, "Could not detect if State Tool is already installed.")
 	}
@@ -236,13 +271,44 @@ func execute(out output.Outputer, cfg *config.Instance, an analytics.Dispatcher,
 		params.path = installPath
 	}
 
+	// Detect if target dir is existing install of same target channel
+	var installedChannel string
+	marker := filepath.Join(installPath, installation.InstallDirMarker)
+	if stateToolInstalled && fileutils.TargetExists(marker) {
+		markerContents, err := fileutils.ReadFile(marker)
+		if err != nil {
+			return errs.Wrap(err, "Could not read marker file")
+		}
+		// The marker file is empty for versions prior to v0.40.0-RC3
+		if len(markerContents) > 0 {
+			var markerMeta installation.InstallMarkerMeta
+			if err := json.Unmarshal(markerContents, &markerMeta); err != nil {
+				return errs.Wrap(err, "Could not parse install marker file")
+			}
+			installedChannel = markerMeta.Channel
+		}
+	}
+	// Older state tools did not bake in meta information, in this case we allow overwriting regardless of channel
+	targetingSameChannel := installedChannel == "" || installedChannel == constants.ChannelName
+
 	// If this is a fresh installation we ensure that the target directory is empty
-	if !stateToolInstalled && fileutils.DirExists(params.path) {
+	if !stateToolInstalled && fileutils.DirExists(params.path) && !params.force {
 		empty, err := fileutils.IsEmptyDir(params.path)
 		if err != nil {
 			return errs.Wrap(err, "Could not check if install path is empty")
 		}
 		if !empty {
+			if usingDefaultInstallPath {
+				// We're having trouble pinning down why these errors are occurring, so report the list of
+				// existing files to Rollbar to help diagnose.
+				if files, err := os.ReadDir(params.path); err == nil {
+					fileList := []string{}
+					for _, file := range files {
+						fileList = append(fileList, filepath.Join(params.path, file.Name()))
+					}
+					rollbar.Critical("Installation path must be an empty directory: %s\nExisting files:\n%s", params.path, strings.Join(fileList, "\n"))
+				}
+			}
 			return locale.NewInputError("err_install_nonempty_dir", "Installation path must be an empty directory: {{.V0}}", params.path)
 		}
 	}
@@ -250,25 +316,17 @@ func execute(out output.Outputer, cfg *config.Instance, an analytics.Dispatcher,
 	// We expect the installer payload to be in the same directory as the installer itself
 	payloadPath := filepath.Dir(osutils.Executable())
 
-	// Older versions of the state tool will not include the --update flag, so we
-	// need to use the legacy way of checking for update
-	// This code whould be removed in the future. See story here: https://activestatef.atlassian.net/browse/DX-985
-	if !params.isUpdate {
-		packagedStateExe := filepath.Join(payloadPath, installation.BinDirName, constants.StateCmd+exeutils.Extension)
-		params.isUpdate = determineLegacyUpdate(stateExePath, stateToolInstalled, packagedStateExe, payloadPath, params)
-	}
-
 	route := "install"
 	if params.isUpdate {
 		route = "update"
 	}
-	an.Event(AnalyticsFunnelCat, route)
+	an.Event(anaConst.CatInstallerFunnel, route)
 
 	// Check if state tool already installed
-	if !params.isUpdate && !params.force && stateToolInstalled {
+	if !params.isUpdate && !params.force && stateToolInstalled && !targetingSameChannel {
 		logging.Debug("Cancelling out because State Tool is already installed")
 		out.Print(fmt.Sprintf("State Tool Package Manager is already installed at [NOTICE]%s[/RESET]. To reinstall use the [ACTIONABLE]--force[/RESET] flag.", installPath))
-		an.Event(AnalyticsFunnelCat, "already-installed")
+		an.Event(anaConst.CatInstallerFunnel, "already-installed")
 		params.isUpdate = true
 		return postInstallEvents(out, cfg, an, params)
 	}
@@ -283,7 +341,7 @@ func execute(out output.Outputer, cfg *config.Instance, an analytics.Dispatcher,
 // installOrUpdateFromLocalSource is invoked when we're performing an installation where the payload is already provided
 func installOrUpdateFromLocalSource(out output.Outputer, cfg *config.Instance, an analytics.Dispatcher, payloadPath string, params *Params) error {
 	logging.Debug("Install from local source")
-	an.Event(AnalyticsFunnelCat, "local-source")
+	an.Event(anaConst.CatInstallerFunnel, "local-source")
 	if !params.isUpdate {
 		// install.sh or install.ps1 downloaded this installer and is running it.
 		out.Print(output.Title("Installing State Tool Package Manager"))
@@ -299,7 +357,7 @@ func installOrUpdateFromLocalSource(out output.Outputer, cfg *config.Instance, a
 		return err
 	}
 
-	installer, err := NewInstaller(cfg, out, payloadPath, params)
+	installer, err := NewInstaller(cfg, out, an, payloadPath, params)
 	if err != nil {
 		out.Print(fmt.Sprintf("[ERROR]Could not create installer: %s[/RESET]", errs.JoinMessage(err)))
 		return err
@@ -312,12 +370,12 @@ func installOrUpdateFromLocalSource(out output.Outputer, cfg *config.Instance, a
 	}
 
 	// Run installer
-	an.Event(AnalyticsFunnelCat, "pre-installer")
+	an.Event(anaConst.CatInstallerFunnel, "pre-installer")
 	if err := installer.Install(); err != nil {
 		out.Print("[ERROR]x Failed[/RESET]")
 		return err
 	}
-	an.Event(AnalyticsFunnelCat, "post-installer")
+	an.Event(anaConst.CatInstallerFunnel, "post-installer")
 	out.Print("[SUCCESS]✔ Done[/RESET]")
 
 	if !params.isUpdate {
@@ -330,7 +388,7 @@ func installOrUpdateFromLocalSource(out output.Outputer, cfg *config.Instance, a
 }
 
 func postInstallEvents(out output.Outputer, cfg *config.Instance, an analytics.Dispatcher, params *Params) error {
-	an.Event(AnalyticsFunnelCat, "post-install-events")
+	an.Event(anaConst.CatInstallerFunnel, "post-install-events")
 
 	installPath, err := resolveInstallPath(params.path)
 	if err != nil {
@@ -356,40 +414,40 @@ func postInstallEvents(out output.Outputer, cfg *config.Instance, an analytics.D
 	switch {
 	// Execute provided --command
 	case params.command != "":
-		an.Event(AnalyticsFunnelCat, "forward-command")
+		an.Event(anaConst.CatInstallerFunnel, "forward-command")
 
-		out.Print(fmt.Sprintf("\nRunning `[ACTIONABLE]%s[/RESET]`\n", params.command))
-		cmd, args := exeutils.DecodeCmd(params.command)
-		if _, _, err := exeutils.ExecuteAndPipeStd(cmd, args, envSlice(binPath)); err != nil {
-			an.EventWithLabel(AnalyticsFunnelCat, "forward-command-err", err.Error())
+		out.Print(fmt.Sprintf("\nRunning '[ACTIONABLE]%s[/RESET]'\n", params.command))
+		cmd, args := osutils.DecodeCmd(params.command)
+		if _, _, err := osutils.ExecuteAndPipeStd(cmd, args, envSlice(binPath)); err != nil {
+			an.EventWithLabel(anaConst.CatInstallerFunnel, "forward-command-err", err.Error())
 			return errs.Silence(errs.Wrap(err, "Running provided command failed, error returned: %s", errs.JoinMessage(err)))
 		}
 	// Activate provided --activate Namespace
 	case params.activate.IsValid():
-		an.Event(AnalyticsFunnelCat, "forward-activate")
+		an.Event(anaConst.CatInstallerFunnel, "forward-activate")
 
-		out.Print(fmt.Sprintf("\nRunning `[ACTIONABLE]state activate %s[/RESET]`\n", params.activate.String()))
-		if _, _, err := exeutils.ExecuteAndPipeStd(stateExe, []string{"activate", params.activate.String()}, envSlice(binPath)); err != nil {
-			an.EventWithLabel(AnalyticsFunnelCat, "forward-activate-err", err.Error())
+		out.Print(fmt.Sprintf("\nRunning '[ACTIONABLE]state activate %s[/RESET]'\n", params.activate.String()))
+		if _, _, err := osutils.ExecuteAndPipeStd(stateExe, []string{"activate", params.activate.String()}, envSlice(binPath)); err != nil {
+			an.EventWithLabel(anaConst.CatInstallerFunnel, "forward-activate-err", err.Error())
 			return errs.Silence(errs.Wrap(err, "Could not activate %s, error returned: %s", params.activate.String(), errs.JoinMessage(err)))
 		}
 	// Activate provided --activate-default Namespace
 	case params.activateDefault.IsValid():
-		an.Event(AnalyticsFunnelCat, "forward-activate-default")
+		an.Event(anaConst.CatInstallerFunnel, "forward-activate-default")
 
-		out.Print(fmt.Sprintf("\nRunning `[ACTIONABLE]state activate --default %s[/RESET]`\n", params.activateDefault.String()))
-		if _, _, err := exeutils.ExecuteAndPipeStd(stateExe, []string{"activate", params.activateDefault.String(), "--default"}, envSlice(binPath)); err != nil {
-			an.EventWithLabel(AnalyticsFunnelCat, "forward-activate-default-err", err.Error())
+		out.Print(fmt.Sprintf("\nRunning '[ACTIONABLE]state activate --default %s[/RESET]'\n", params.activateDefault.String()))
+		if _, _, err := osutils.ExecuteAndPipeStd(stateExe, []string{"activate", params.activateDefault.String(), "--default"}, envSlice(binPath)); err != nil {
+			an.EventWithLabel(anaConst.CatInstallerFunnel, "forward-activate-default-err", err.Error())
 			return errs.Silence(errs.Wrap(err, "Could not activate %s, error returned: %s", params.activateDefault.String(), errs.JoinMessage(err)))
 		}
-	case !params.isUpdate && terminal.IsTerminal(int(os.Stdin.Fd())) && os.Getenv(constants.InstallerNoSubshell) != "true":
+	case !params.isUpdate && term.IsTerminal(int(os.Stdin.Fd())) && os.Getenv(constants.InstallerNoSubshell) != "true" && os.Getenv("TERM") != "dumb":
 		if err := ss.SetEnv(osutils.InheritEnv(envMap(binPath))); err != nil {
 			return locale.WrapError(err, "err_subshell_setenv")
 		}
 		if err := ss.Activate(nil, cfg, out); err != nil {
 			return errs.Wrap(err, "Error activating subshell: %s", errs.JoinMessage(err))
 		}
-		if err = <-ss.Errors(); err != nil {
+		if err = <-ss.Errors(); err != nil && !errs.IsSilent(err) {
 			return errs.Wrap(err, "Error during subshell execution: %s", errs.JoinMessage(err))
 		}
 	}
@@ -441,70 +499,9 @@ func assertCompatibility() error {
 		if err != nil {
 			return locale.WrapError(err, "windows_compatibility_warning", "", err.Error())
 		} else if osv.Major < 10 || (osv.Major == 10 && osv.Micro < 17134) {
-			return locale.WrapError(err, "windows_compatibility_error")
+			return locale.WrapError(err, "windows_compatibility_error", "", osv.Name, osv.Version)
 		}
 	}
 
 	return nil
-}
-
-func determineLegacyUpdate(exePath string, isToolInstalled bool, packagedStateExe, payloadPath string, params *Params) bool {
-	// Detect whether this is a fresh install or an update
-	var isUpdate bool
-	switch {
-	case (params.sourceInstaller == "install.sh" || params.sourceInstaller == "install.ps1" || noArgs()) && fileutils.FileExists(packagedStateExe):
-		if isToolInstalled && !params.force && shouldUpdateInstalledStateTool(exePath) {
-			logging.Debug("Installing via %s, found old install and updating.", params.sourceInstaller)
-			isUpdate = true
-		} else {
-			logging.Debug("Not using update flow as installing via " + params.sourceInstaller)
-		}
-	case params.force:
-		// When ran with `--force` we always use the install UX
-		logging.Debug("Not using update flow as --force was passed")
-	case payloadPath == "" && fileutils.FileExists(packagedStateExe):
-		// Facilitate older versions of state tool which do not invoke the installer with `--source-path`
-		logging.Debug("Using update flow as installer is alongside payload")
-		isUpdate = true
-	case isToolInstalled:
-		// This should trigger AFTER the check above where sourcePath is defined
-		logging.Debug("Using update flow as state tool is already installed")
-		isUpdate = true
-	}
-
-	return isUpdate
-}
-
-func noArgs() bool {
-	return len(os.Args[1:]) == 0
-}
-
-func shouldUpdateInstalledStateTool(stateExePath string) bool {
-	logging.Debug("Checking if installed state tool is an older version.")
-
-	stdout, _, err := exeutils.ExecSimple(stateExePath, []string{"--version", "--output", "json"}, os.Environ())
-	if err != nil {
-		logging.Debug("Could not determine state tool version.")
-		return true // probably corrupted install
-	}
-	stdout = strings.Split(stdout, "\x00")[0] // TODO: DX-328
-
-	versionData := installation.VersionData{}
-	err = json.Unmarshal([]byte(stdout), &versionData)
-	if err != nil {
-		logging.Debug("Could not read state tool version output")
-		return true
-	}
-
-	if versionData.Branch != constants.BranchName {
-		logging.Debug("State tool branch is different from installer.")
-		return false // do not update, require --force
-	}
-
-	if versionData.Version != constants.Version {
-		logging.Debug("State tool version is different from installer.")
-		return true
-	}
-
-	return false
 }

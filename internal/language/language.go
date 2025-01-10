@@ -5,8 +5,9 @@ import (
 	"strings"
 
 	"github.com/ActiveState/cli/internal/constants"
-	"github.com/ActiveState/cli/internal/exeutils"
 	"github.com/ActiveState/cli/internal/locale"
+	"github.com/ActiveState/cli/internal/osutils"
+	"github.com/thoas/go-funk"
 )
 
 // Language tracks the languages potentially used.
@@ -32,7 +33,7 @@ func UnrecognizedLanguageError(name string, options []string) *locale.LocalizedE
 	if len(options) > 0 {
 		opts = strings.Join(options, ", ")
 	}
-	return locale.NewError("err_invalid_language", "", name, opts)
+	return locale.NewInputError("err_invalid_language", "", name, opts)
 }
 
 const (
@@ -57,11 +58,11 @@ var lookup = [...]languageData{
 	},
 	{
 		"bash", "Bash", ".sh", true, "", "",
-		Executable{"bash" + exeutils.Extension, true},
+		Executable{"bash" + osutils.ExeExtension, true},
 	},
 	{
 		"sh", "Shell", ".sh", true, "", "",
-		Executable{"sh" + exeutils.Extension, true},
+		Executable{"sh" + osutils.ExeExtension, true},
 	},
 	{
 		"batch", "Batch", ".bat", false, "", "",
@@ -72,19 +73,19 @@ var lookup = [...]languageData{
 		Executable{"powershell.exe", true},
 	},
 	{
-		"perl", "Perl", ".pl", true, "perl", "5.32.1",
+		"perl", "Perl", ".pl", true, "perl", "5.36.0",
 		Executable{constants.ActivePerlExecutable, false},
 	},
 	{
-		"python3", "Python 3", ".py", true, "python", "3.9.6",
+		"python3", "Python 3", ".py", true, "python", "3.10.8",
 		Executable{constants.ActivePython3Executable, false},
 	},
 	{
-		"python2", "Python 2", ".py", true, "python", "2.7.14",
+		"python2", "Python 2", ".py", true, "python", "2.7.18.5",
 		Executable{constants.ActivePython2Executable, false},
 	},
 	{
-		"ruby", "Ruby", ".rb", true, "ruby", "3.0.1",
+		"ruby", "Ruby", ".rb", true, "ruby", "3.2.2",
 		Executable{constants.RubyExecutable, false},
 	},
 }
@@ -119,19 +120,17 @@ func MakeByName(name string) Language {
 }
 
 // MakeByNameAndVersion will retrieve a language by a given name and version.
-func MakeByNameAndVersion(name, version string) (Language, error) {
-	if version != "" && strings.ToLower(name) == Python3.Requirement() {
-		parts := strings.Split(version, ".")
-		if len(parts) == 0 || parts[0] == "" {
-			return Unknown, locale.NewError("err_invalid_language_version", "Invalid language version number: {{.V0}}", version)
-		}
-		name = name + parts[0]
-	}
-	if version == "" && strings.ToLower(name) == Python3.Requirement() {
-		// This addressed the language only specifying "python", in this case we default to python3
+func MakeByNameAndVersion(name, version string) Language {
+	if strings.ToLower(name) == Python3.Requirement() {
 		name = Python3.String()
+		// Disambiguate python, preferring Python3.
+		major, _, _ := strings.Cut(version, ".")
+		major = strings.TrimLeft(major, ">=<") // constraint characters (e.g. ">3.9")
+		if major == "2" {
+			name = Python2.String()
+		}
 	}
-	return MakeByName(name), nil
+	return MakeByName(name)
 }
 
 // MakeByText will retrieve a language by a given text
@@ -171,7 +170,7 @@ func (l *Language) Recognized() bool {
 // Validate ensures that the current language is recognized
 func (l *Language) Validate() error {
 	if !l.Recognized() {
-		return UnrecognizedLanguageError(l.String(), RecognizedNames())
+		return UnrecognizedLanguageError(l.String(), RecognizedSupportedsNames())
 	}
 	return nil
 }
@@ -190,7 +189,7 @@ func (l Language) Header() string {
 	return ""
 }
 
-// TempPattern returns the ioutil.TempFile pattern to be used to form the temp
+// TempPattern returns the os.CreateTemp pattern to be used to form the temp
 // file name.
 func (l Language) TempPattern() string {
 	return filePatternPrefix + l.data().ext
@@ -346,8 +345,8 @@ func RecognizedSupportedsNames() []string {
 	var supporteds []string
 	for i, data := range lookup {
 		l := Supported{Language(i)}
-		if l.Recognized() {
-			supporteds = append(supporteds, data.name)
+		if l.Recognized() && !funk.Contains(supporteds, data.require) {
+			supporteds = append(supporteds, data.require)
 		}
 	}
 	return supporteds

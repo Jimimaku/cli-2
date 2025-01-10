@@ -5,21 +5,24 @@ import (
 	"testing"
 	"time"
 
+	"github.com/ActiveState/cli/internal/constants"
 	"github.com/ActiveState/cli/internal/errs"
 	"github.com/ActiveState/cli/internal/installation"
 	"github.com/ActiveState/cli/internal/installation/storage"
 	"github.com/ActiveState/cli/internal/logging"
 	"github.com/ActiveState/cli/internal/svcctl"
 	"github.com/ActiveState/cli/internal/testhelpers/e2e"
+	"github.com/ActiveState/cli/internal/testhelpers/suite"
 	"github.com/ActiveState/cli/internal/testhelpers/tagsuite"
 	"github.com/ActiveState/cli/pkg/platform/model"
-	"github.com/stretchr/testify/suite"
 	"golang.org/x/net/context"
 )
 
-var SvcEnsureStartMaxTime = 1000 * time.Millisecond // https://activestatef.atlassian.net/browse/DX-935
-var SvcRequestMaxTime = 50 * time.Millisecond
-var SvcStopMaxTime = 50 * time.Millisecond
+var (
+	SvcEnsureStartMaxTime = 1000 * time.Millisecond // https://activestatef.atlassian.net/browse/DX-935
+	SvcRequestMaxTime     = 200 * time.Millisecond
+	SvcStopMaxTime        = 333 * time.Millisecond
+)
 
 type PerformanceSvcIntegrationTestSuite struct {
 	tagsuite.Suite
@@ -50,7 +53,7 @@ func (suite *PerformanceIntegrationTestSuite) TestSvcPerformance() {
 		suite.Require().NoError(err, errs.JoinMessage(err))
 
 		t := time.Now()
-		svcPort, err = svcctl.EnsureExecStartedAndLocateHTTP(ipcClient, svcExec, "from test")
+		svcPort, err = svcctl.EnsureExecStartedAndLocateHTTP(ipcClient, svcExec, "from test", nil)
 		suite.Require().NoError(err, ts.DebugMessage(fmt.Sprintf("Error: %s\nLog Tail:\n%s", errs.JoinMessage(err), logging.ReadTail())))
 		duration := time.Since(t)
 
@@ -69,29 +72,29 @@ func (suite *PerformanceIntegrationTestSuite) TestSvcPerformance() {
 		duration := time.Since(t)
 
 		if duration.Nanoseconds() > SvcRequestMaxTime.Nanoseconds() {
-			suite.Fail(fmt.Sprintf("Service request took too long: %s (should be under %s)", duration.String(), SvcEnsureStartMaxTime.String()))
+			suite.Fail(fmt.Sprintf("Service request took too long: %s (should be under %s)", duration.String(), SvcRequestMaxTime.String()))
 		}
 	})
 
 	suite.Run("Query Analytics", func() {
 		t := time.Now()
-		err := svcmodel.AnalyticsEvent(context.Background(), "performance-test", "performance-test", "performance-test", "{}")
+		err := svcmodel.AnalyticsEvent(context.Background(), "performance-test", "performance-test", "performance-test", "performance-test", "{}")
 		suite.Require().NoError(err, ts.DebugMessage(fmt.Sprintf("Error: %s\nLog Tail:\n%s", errs.JoinMessage(err), logging.ReadTail())))
 		duration := time.Since(t)
 
 		if duration.Nanoseconds() > SvcRequestMaxTime.Nanoseconds() {
-			suite.Fail(fmt.Sprintf("Service analytics request took too long: %s (should be under %s)", duration.String(), SvcEnsureStartMaxTime.String()))
+			suite.Fail(fmt.Sprintf("Service analytics request took too long: %s (should be under %s)", duration.String(), SvcRequestMaxTime.String()))
 		}
 	})
 
 	suite.Run("Query Update", func() {
 		t := time.Now()
-		_, err := svcmodel.CheckUpdate(context.Background())
+		_, err := svcmodel.CheckUpdate(context.Background(), constants.ChannelName, "")
 		suite.Require().NoError(err, ts.DebugMessage(fmt.Sprintf("Error: %s\nLog Tail:\n%s", errs.JoinMessage(err), logging.ReadTail())))
 		duration := time.Since(t)
 
 		if duration.Nanoseconds() > SvcRequestMaxTime.Nanoseconds() {
-			suite.Fail(fmt.Sprintf("Service update request took too long: %s (should be under %s)", duration.String(), SvcEnsureStartMaxTime.String()))
+			suite.Fail(fmt.Sprintf("Service update request took too long: %s (should be under %s)", duration.String(), SvcRequestMaxTime.String()))
 		}
 	})
 

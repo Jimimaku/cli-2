@@ -47,7 +47,8 @@ func newFileHandler() *fileHandler {
 }
 
 func (l *fileHandler) start() {
-	defer handlePanics(recover())
+	defer func() { handlePanics(recover()) }()
+
 	for {
 		select {
 		case entry := <-l.queue:
@@ -94,7 +95,7 @@ func (l *fileHandler) emit(ctx *MessageContext, message string, args ...interfac
 
 	message = l.formatter.Format(ctx, message, args...)
 	if l.verbose.value() {
-		fmt.Fprintln(os.Stderr, fmt.Sprintf("(PID %d) %s", os.Getpid(), message))
+		fmt.Fprintf(os.Stderr, "(PID %d) %s\n", os.Getpid(), message)
 	}
 
 	if l.file == nil {
@@ -152,5 +153,13 @@ func (l *fileHandler) Close() {
 
 	close(l.quit)
 	l.wg.Wait()
+
+	if l.file != nil {
+		err := l.file.Close()
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Failed to close log file. Error: %v\n", err)
+		}
+	}
+
 	l.closed = true
 }

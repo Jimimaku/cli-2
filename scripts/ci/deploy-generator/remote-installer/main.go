@@ -15,7 +15,7 @@ import (
 func main() {
 	err := run()
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "%s error: %v", os.Args[0], errs.Join(err, ":"))
+		fmt.Fprintf(os.Stderr, "%s error: %v", os.Args[0], errs.JoinMessage(err))
 	}
 }
 
@@ -30,8 +30,8 @@ func run() error {
 	}
 	platform := goos + "-" + goarch
 
-	relPath := filepath.Join("remote-installer", platform)
-	relVersionedPath := filepath.Join("remote-installer", version, platform)
+	relPath := filepath.Join("remote-installer", constants.ChannelName, platform)
+	relVersionedPath := filepath.Join("remote-installer", constants.ChannelName, version, platform)
 
 	buildPath := filepath.Join(environment.GetRootPathUnsafe(), "build")
 

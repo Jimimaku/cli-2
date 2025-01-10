@@ -6,18 +6,16 @@ import (
 	"runtime"
 	"strings"
 
+	"github.com/ActiveState/cli/internal/constants"
+	"github.com/ActiveState/cli/internal/constraints"
 	"github.com/ActiveState/cli/internal/errs"
 	"github.com/ActiveState/cli/internal/language"
 	"github.com/ActiveState/cli/internal/locale"
 	"github.com/ActiveState/cli/internal/osutils"
+	"github.com/ActiveState/cli/internal/rxutils"
 	"github.com/ActiveState/cli/internal/scriptfile"
 	"github.com/ActiveState/cli/pkg/platform/authentication"
 	"github.com/ActiveState/cli/pkg/projectfile"
-
-	"github.com/ActiveState/cli/internal/rxutils"
-
-	"github.com/ActiveState/cli/internal/constants"
-	"github.com/ActiveState/cli/internal/constraints"
 )
 
 type Expansion struct {
@@ -33,7 +31,7 @@ func NewExpansion(p *Project) *Expansion {
 // ApplyWithMaxDepth limits the depth of an expansion to avoid infinite expansion of a value.
 func (ctx *Expansion) ApplyWithMaxDepth(s string, depth int) (string, error) {
 	if depth > constants.ExpanderMaxDepth {
-		return "", locale.NewInputError("err_expand_recursion", "Infinite recursion trying to expand variable '{{.V0}}'", s)
+		return "", locale.NewExternalError("err_expand_recursion", "Infinite recursion trying to expand variable '{{.V0}}'", s)
 	}
 
 	regex := regexp.MustCompile(`\${?(\w+)\.?([\w-]+)?\.?([\w\.-]+)?(\(\))?}?`)
@@ -111,34 +109,6 @@ func ExpandFromScript(s string, script *Script) (string, error) {
 // or a Failure if expansion was unsuccessful.
 type ExpanderFunc func(variable, name, meta string, isFunction bool, ctx *Expansion) (string, error)
 
-// PlatformExpander expends metadata about the current platform.
-func PlatformExpander(_ string, name string, meta string, isFunction bool, ctx *Expansion) (string, error) {
-	projectFile := ctx.Project.Source()
-	for _, platform := range projectFile.Platforms {
-		if !constraints.PlatformMatches(platform) {
-			continue
-		}
-
-		switch name {
-		case "name":
-			return platform.Name, nil
-		case "os":
-			return platform.Os, nil
-		case "version":
-			return platform.Version, nil
-		case "architecture":
-			return platform.Architecture, nil
-		case "libc":
-			return platform.Libc, nil
-		case "compiler":
-			return platform.Compiler, nil
-		default:
-			return "", locale.NewInputError("err_expand_platform", "Unrecognized platform variable '{{.V0}}'", name)
-		}
-	}
-	return "", nil
-}
-
 // EventExpander expands events defined in the project-file.
 func EventExpander(_ string, name string, meta string, isFunction bool, ctx *Expansion) (string, error) {
 	projectFile := ctx.Project.Source()
@@ -156,7 +126,10 @@ func EventExpander(_ string, name string, meta string, isFunction bool, ctx *Exp
 
 // ScriptExpander expands scripts defined in the project-file.
 func ScriptExpander(_ string, name string, meta string, isFunction bool, ctx *Expansion) (string, error) {
-	script := ctx.Project.ScriptByName(name)
+	script, err := ctx.Project.ScriptByName(name)
+	if err != nil {
+		return "", errs.Wrap(err, "Could not get script")
+	}
 	if script == nil {
 		return "", nil
 	}
@@ -267,7 +240,8 @@ func ProjectExpander(_ string, name string, _ string, isFunction bool, ctx *Expa
 	case "url":
 		return project.URL(), nil
 	case "commit":
-		return project.CommitID(), nil
+		commitID := project.LegacyCommitID() // Not using localcommit due to import cycle. See anti-pattern comment in localcommit pkg.
+		return commitID, nil
 	case "branch":
 		return project.BranchName(), nil
 	case "owner":

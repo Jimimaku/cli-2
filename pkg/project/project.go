@@ -2,9 +2,7 @@ package project
 
 import (
 	"errors"
-	"fmt"
 	"log"
-	"os"
 	"path/filepath"
 	"regexp"
 	"runtime"
@@ -20,8 +18,8 @@ import (
 	"github.com/ActiveState/cli/internal/osutils"
 	"github.com/ActiveState/cli/internal/output"
 	secretsapi "github.com/ActiveState/cli/pkg/platform/api/secrets"
+	"github.com/ActiveState/cli/pkg/platform/authentication"
 	"github.com/ActiveState/cli/pkg/projectfile"
-	"github.com/go-openapi/strfmt"
 )
 
 // Build covers the build structure
@@ -51,33 +49,11 @@ type Project struct {
 }
 
 // Source returns the source projectfile
-func (p *Project) Source() *projectfile.Project { return p.projectfile }
-
-func (p *Project) SetCommit(commitID string) error {
-	return p.Source().SetCommit(commitID, p.IsHeadless())
-}
-
-// Platforms gets platforms
-func (p *Project) Platforms() []*Platform {
-	platforms := []*Platform{}
-	for i := range p.projectfile.Platforms {
-		platforms = append(platforms, &Platform{&p.projectfile.Platforms[i], p})
+func (p *Project) Source() *projectfile.Project {
+	if p == nil {
+		return nil
 	}
-	return platforms
-}
-
-// Languages returns a reference to projectfile.Languages
-func (p *Project) Languages() []*Language {
-	constrained, err := constraints.FilterUnconstrained(pConditional, p.projectfile.Languages.AsConstrainedEntities())
-	if err != nil {
-		logging.Warning("Could not filter unconstrained languages: %v", err)
-	}
-	ls := projectfile.MakeLanguagesFromConstrainedEntities(constrained)
-	languages := []*Language{}
-	for _, l := range ls {
-		languages = append(languages, &Language{l, p})
-	}
-	return languages
+	return p.projectfile
 }
 
 // Constants returns a reference to projectfile.Constants
@@ -105,7 +81,7 @@ func (p *Project) ConstantByName(name string) *Constant {
 }
 
 // Secrets returns a reference to projectfile.Secrets
-func (p *Project) Secrets(cfg keypairs.Configurable) []*Secret {
+func (p *Project) Secrets(cfg keypairs.Configurable, auth *authentication.Auth) []*Secret {
 	secrets := []*Secret{}
 	if p.projectfile.Secrets == nil {
 		return secrets
@@ -117,7 +93,7 @@ func (p *Project) Secrets(cfg keypairs.Configurable) []*Secret {
 		}
 		secs := projectfile.MakeSecretsFromConstrainedEntities(constrained)
 		for _, s := range secs {
-			secrets = append(secrets, p.NewSecret(s, SecretScopeUser, cfg))
+			secrets = append(secrets, p.NewSecret(s, SecretScopeUser, cfg, auth))
 		}
 	}
 	if p.projectfile.Secrets.Project != nil {
@@ -127,15 +103,15 @@ func (p *Project) Secrets(cfg keypairs.Configurable) []*Secret {
 		}
 		secs := projectfile.MakeSecretsFromConstrainedEntities(constrained)
 		for _, secret := range secs {
-			secrets = append(secrets, p.NewSecret(secret, SecretScopeProject, cfg))
+			secrets = append(secrets, p.NewSecret(secret, SecretScopeProject, cfg, auth))
 		}
 	}
 	return secrets
 }
 
 // SecretByName returns a secret matching the given name (if any)
-func (p *Project) SecretByName(name string, scope SecretScope, cfg keypairs.Configurable) *Secret {
-	for _, secret := range p.Secrets(cfg) {
+func (p *Project) SecretByName(name string, scope SecretScope, cfg keypairs.Configurable, auth *authentication.Auth) *Secret {
+	for _, secret := range p.Secrets(cfg, auth) {
 		if secret.Name() == name && secret.scope == scope {
 			return secret
 		}
@@ -161,7 +137,7 @@ func (p *Project) Events() []*Event {
 // EventByName returns a reference to a projectfile.Script with a given name.
 func (p *Project) EventByName(name string, bashifyPaths bool) *Event {
 	for _, event := range p.Events() {
-		if strings.ToLower(event.Name()) == strings.ToLower(name) {
+		if strings.EqualFold(event.Name(), name) {
 			event.BashifyPaths = bashifyPaths
 			return event
 		}
@@ -170,27 +146,31 @@ func (p *Project) EventByName(name string, bashifyPaths bool) *Event {
 }
 
 // Scripts returns a reference to projectfile.Scripts
-func (p *Project) Scripts() []*Script {
+func (p *Project) Scripts() ([]*Script, error) {
 	constrained, err := constraints.FilterUnconstrained(pConditional, p.projectfile.Scripts.AsConstrainedEntities())
 	if err != nil {
-		logging.Warning("Could not filter unconstrained scripts: %v", err)
+		return nil, errs.Wrap(err, "Could not filter unconstrained scripts")
 	}
 	scs := projectfile.MakeScriptsFromConstrainedEntities(constrained)
 	scripts := make([]*Script, 0, len(scs))
 	for _, s := range scs {
 		scripts = append(scripts, &Script{s, p})
 	}
-	return scripts
+	return scripts, nil
 }
 
 // ScriptByName returns a reference to a projectfile.Script with a given name.
-func (p *Project) ScriptByName(name string) *Script {
-	for _, script := range p.Scripts() {
+func (p *Project) ScriptByName(name string) (*Script, error) {
+	scripts, err := p.Scripts()
+	if err != nil {
+		return nil, errs.Wrap(err, "Could not get scripts")
+	}
+	for _, script := range scripts {
 		if script.Name() == name {
-			return script
+			return script, nil
 		}
 	}
-	return nil
+	return nil, nil
 }
 
 // Jobs returns a reference to projectfile.Jobs
@@ -221,16 +201,6 @@ func (p *Project) Private() bool {
 	return p.Source().Private
 }
 
-// CommitID returns project commitID
-func (p *Project) CommitID() string {
-	return p.projectfile.CommitID()
-}
-
-// CommitUUID returns project commitID in UUID format
-func (p *Project) CommitUUID() strfmt.UUID {
-	return strfmt.UUID(p.CommitID())
-}
-
 // BranchName returns the project branch name
 func (p *Project) BranchName() string {
 	return p.projectfile.BranchName()
@@ -246,6 +216,20 @@ func (p *Project) Dir() string {
 	return filepath.Dir(p.projectfile.Path())
 }
 
+// ProjectDir is an alias for Dir() to satisfy interfaces that may also target the setup.Targeter interface.
+func (p *Project) ProjectDir() string {
+	return p.Dir()
+}
+
+// LegacyCommitID is for use by legacy mechanics ONLY
+func (p *Project) LegacyCommitID() string {
+	return p.projectfile.LegacyCommitID()
+}
+
+func (p *Project) SetLegacyCommit(commitID string) error {
+	return p.projectfile.SetLegacyCommit(commitID)
+}
+
 func (p *Project) IsHeadless() bool {
 	match := projectfile.CommitURLRe.FindStringSubmatch(p.URL())
 	return len(match) > 1
@@ -259,8 +243,8 @@ func (p *Project) NormalizedName() string {
 // Version returns the locked state tool version
 func (p *Project) Version() string { return p.projectfile.Version() }
 
-// VersionBranch returns branch that we're pinned to (useless unless version is also set)
-func (p *Project) VersionBranch() string { return p.projectfile.VersionBranch() }
+// Channel returns channel that we're pinned to (useless unless version is also set)
+func (p *Project) Channel() string { return p.projectfile.Channel() }
 
 // IsLocked returns whether the current project is locked
 func (p *Project) IsLocked() bool { return p.Lock() != "" }
@@ -268,10 +252,14 @@ func (p *Project) IsLocked() bool { return p.Lock() != "" }
 // Lock returns the lock information for this project
 func (p *Project) Lock() string { return p.projectfile.Lock }
 
+// Cache returns the cache information for this project
+func (p *Project) Cache() string { return p.projectfile.Cache }
+
+func (p *Project) IsPortable() bool { return p.projectfile.Portable }
+
 // Namespace returns project namespace
 func (p *Project) Namespace() *Namespaced {
-	commitID := strfmt.UUID(p.projectfile.CommitID())
-	return &Namespaced{p.projectfile.Owner(), p.projectfile.Name(), &commitID, false}
+	return &Namespaced{Owner: p.projectfile.Owner(), Project: p.projectfile.Name()}
 }
 
 // NamespaceString is a convenience function to make interfaces simpler
@@ -302,33 +290,8 @@ func Parse(fpath string) (*Project, error) {
 	return New(pjfile, output.Get())
 }
 
-// Get returns project struct. Quits execution if error occurs
-func Get() *Project {
-	pj := projectfile.Get()
-	project, err := New(pj, output.Get())
-	if err != nil {
-		fmt.Fprint(os.Stderr, locale.Tr("err_project_unavailable", err.Error()))
-		os.Exit(1)
-	}
-	return project
-}
-
-// GetSafe returns project struct.  Produces failure if error occurs, allows recovery
-func GetSafe() (*Project, error) {
-	pjFile, err := projectfile.GetSafe()
-	if err != nil {
-		return nil, err
-	}
-	project, err := New(pjFile, output.Get())
-	if err != nil {
-		return nil, err
-	}
-
-	return project, nil
-}
-
-// GetOnce returns project struct the same as Get and GetSafe, but it avoids persisting the project
-func GetOnce() (*Project, error) {
+// FromWD will return the project that's located at the current working directory
+func FromWD() (*Project, error) {
 	wd, err := osutils.Getwd()
 	if err != nil {
 		return nil, errs.Wrap(err, "Getwd failure")
@@ -372,118 +335,6 @@ func FromExactPath(path string) (*Project, error) {
 	}
 
 	return project, nil
-}
-
-// Platform covers the platform structure
-type Platform struct {
-	platform *projectfile.Platform
-	project  *Project
-}
-
-// Source returns the source projectfile
-func (p *Platform) Source() *projectfile.Project { return p.project.projectfile }
-
-// Name returns platform name
-func (p *Platform) Name() string { return p.platform.Name }
-
-// Os returned with all secrets evaluated
-func (p *Platform) Os() (string, error) {
-	return ExpandFromProject(p.platform.Os, p.project)
-}
-
-// Version returned with all secrets evaluated
-func (p *Platform) Version() (string, error) {
-	return ExpandFromProject(p.platform.Version, p.project)
-}
-
-// Architecture with all secrets evaluated
-func (p *Platform) Architecture() (string, error) {
-	return ExpandFromProject(p.platform.Architecture, p.project)
-}
-
-// Libc returned are constrained and all secrets evaluated
-func (p *Platform) Libc() (string, error) {
-	return ExpandFromProject(p.platform.Libc, p.project)
-}
-
-// Compiler returned are constrained and all secrets evaluated
-func (p *Platform) Compiler() (string, error) {
-	return ExpandFromProject(p.platform.Compiler, p.project)
-}
-
-// Language covers the language structure
-type Language struct {
-	language *projectfile.Language
-	project  *Project
-}
-
-// Source returns the source projectfile
-func (l *Language) Source() *projectfile.Project { return l.project.projectfile }
-
-// Name with all secrets evaluated
-func (l *Language) Name() string { return l.language.Name }
-
-// Version with all secrets evaluated
-func (l *Language) Version() string { return l.language.Version }
-
-// ID is an identifier for this language; e.g. the Name + Version
-func (l *Language) ID() string {
-	return l.Name() + l.Version()
-}
-
-// Build with all secrets evaluated
-func (l *Language) Build() (*Build, error) {
-	build := Build{}
-	for key, val := range l.language.Build {
-		newVal, err := ExpandFromProject(val, l.project)
-		if err != nil {
-			return nil, err
-		}
-		build[key] = newVal
-	}
-	return &build, nil
-}
-
-// Packages returned are constrained set
-func (l *Language) Packages() []Package {
-	constrained, err := constraints.FilterUnconstrained(pConditional, l.language.Packages.AsConstrainedEntities())
-	if err != nil {
-		logging.Warning("Could not filter unconstrained packages: %v", err)
-	}
-	ps := projectfile.MakePackagesFromConstrainedEntities(constrained)
-	validPackages := make([]Package, 0, len(ps))
-	for _, pkg := range ps {
-		validPackages = append(validPackages, Package{pkg: pkg, project: l.project})
-	}
-	return validPackages
-}
-
-// Package covers the package structure
-type Package struct {
-	pkg     *projectfile.Package
-	project *Project
-}
-
-// Source returns the source projectfile
-func (p *Package) Source() *projectfile.Project { return p.project.projectfile }
-
-// Name returns package name
-func (p *Package) Name() string { return p.pkg.Name }
-
-// Version returns package version
-func (p *Package) Version() string { return p.pkg.Version }
-
-// Build returned with all secrets evaluated
-func (p *Package) Build() (*Build, error) {
-	build := Build{}
-	for key, val := range p.pkg.Build {
-		newVal, err := ExpandFromProject(val, p.project)
-		if err != nil {
-			return nil, err
-		}
-		build[key] = newVal
-	}
-	return &build, nil
 }
 
 // Constant covers the constant structure
@@ -534,18 +385,19 @@ type Secret struct {
 	project *Project
 	scope   SecretScope
 	cfg     keypairs.Configurable
+	auth    *authentication.Auth
 }
 
 // InitSecret creates a new secret with the given name and all default settings
-func (p *Project) InitSecret(name string, scope SecretScope, cfg keypairs.Configurable) *Secret {
+func (p *Project) InitSecret(name string, scope SecretScope, cfg keypairs.Configurable, auth *authentication.Auth) *Secret {
 	return p.NewSecret(&projectfile.Secret{
 		Name: name,
-	}, scope, cfg)
+	}, scope, cfg, auth)
 }
 
 // NewSecret creates a new secret struct
-func (p *Project) NewSecret(s *projectfile.Secret, scope SecretScope, cfg keypairs.Configurable) *Secret {
-	return &Secret{s, p, scope, cfg}
+func (p *Project) NewSecret(s *projectfile.Secret, scope SecretScope, cfg keypairs.Configurable, auth *authentication.Auth) *Secret {
+	return &Secret{s, p, scope, cfg, auth}
 }
 
 // Source returns the source projectfile
@@ -568,7 +420,7 @@ func (s *Secret) IsProject() bool { return s.scope == SecretScopeProject }
 
 // ValueOrNil acts as Value() except it can return a nil
 func (s *Secret) ValueOrNil() (*string, error) {
-	secretsExpander := NewSecretExpander(secretsapi.GetClient(), nil, nil, s.cfg)
+	secretsExpander := NewSecretExpander(secretsapi.GetClient(s.auth), nil, nil, s.cfg, s.auth)
 
 	category := ProjectCategory
 	if s.IsUser() {
@@ -735,12 +587,16 @@ func (j *Job) Constants() []*Constant {
 	return constants
 }
 
-func (j *Job) Scripts() []*Script {
+func (j *Job) Scripts() ([]*Script, error) {
 	scripts := []*Script{}
 	for _, scriptName := range j.job.Scripts {
-		if script := j.project.ScriptByName(scriptName); script != nil {
+		script, err := j.project.ScriptByName(scriptName)
+		if err != nil {
+			return nil, errs.Wrap(err, "Could not get script")
+		}
+		if script != nil {
 			scripts = append(scripts, script)
 		}
 	}
-	return scripts
+	return scripts, nil
 }

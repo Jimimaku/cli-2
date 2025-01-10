@@ -2,15 +2,16 @@ package gqlerror
 
 import (
 	"bytes"
+	"errors"
 	"fmt"
 	"strconv"
 
 	"github.com/vektah/gqlparser/v2/ast"
 )
 
-// Error is the standard graphql error type described in https://facebook.github.io/graphql/draft/#sec-Errors
+// Error is the standard graphql error type described in https://spec.graphql.org/draft/#sec-Errors
 type Error struct {
-	err        error                  `json:"-"`
+	Err        error                  `json:"-"`
 	Message    string                 `json:"message"`
 	Path       ast.Path               `json:"path,omitempty"`
 	Locations  []Location             `json:"locations,omitempty"`
@@ -63,12 +64,19 @@ func (err *Error) Error() string {
 	return res.String()
 }
 
-func (err Error) pathString() string {
+func (err *Error) pathString() string {
 	return err.Path.String()
 }
 
-func (err Error) Unwrap() error {
-	return err.err
+func (err *Error) Unwrap() error {
+	return err.Err
+}
+
+func (err *Error) AsError() error {
+	if err == nil {
+		return nil
+	}
+	return err
 }
 
 func (errs List) Error() string {
@@ -80,11 +88,63 @@ func (errs List) Error() string {
 	return buf.String()
 }
 
+func (errs List) Is(target error) bool {
+	for _, err := range errs {
+		if errors.Is(err, target) {
+			return true
+		}
+	}
+	return false
+}
+
+func (errs List) As(target interface{}) bool {
+	for _, err := range errs {
+		if errors.As(err, target) {
+			return true
+		}
+	}
+	return false
+}
+
+func (errs List) Unwrap() []error {
+	l := make([]error, len(errs))
+	for i, err := range errs {
+		l[i] = err
+	}
+	return l
+}
+
 func WrapPath(path ast.Path, err error) *Error {
+	if err == nil {
+		return nil
+	}
 	return &Error{
-		err:     err,
+		Err:     err,
 		Message: err.Error(),
 		Path:    path,
+	}
+}
+
+func Wrap(err error) *Error {
+	if err == nil {
+		return nil
+	}
+	return &Error{
+		Err:     err,
+		Message: err.Error(),
+	}
+}
+
+func WrapIfUnwrapped(err error) *Error {
+	if err == nil {
+		return nil
+	}
+	if gqlErr, ok := err.(*Error); ok {
+		return gqlErr
+	}
+	return &Error{
+		Err:     err,
+		Message: err.Error(),
 	}
 }
 

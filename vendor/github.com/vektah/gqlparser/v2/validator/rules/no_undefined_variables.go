@@ -2,6 +2,8 @@ package validator
 
 import (
 	"github.com/vektah/gqlparser/v2/ast"
+
+	//nolint:revive // Validator rules each use dot imports for convenience.
 	. "github.com/vektah/gqlparser/v2/validator"
 )
 
@@ -15,7 +17,7 @@ func init() {
 			if walker.CurrentOperation.Name != "" {
 				addError(
 					Message(`Variable "%s" is not defined by operation "%s".`, value, walker.CurrentOperation.Name),
-					At(walker.CurrentOperation.Position),
+					At(value.Position),
 				)
 			} else {
 				addError(

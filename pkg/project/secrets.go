@@ -41,33 +41,35 @@ type SecretExpander struct {
 	project         *Project
 	prompt          prompt.Prompter
 	cfg             keypairs.Configurable
+	auth            *authentication.Auth
 	secrets         []*secretsModels.UserSecret
 	secretsAccessed []*SecretAccess
 	cachedSecrets   map[string]string
 }
 
 // NewSecretExpander returns a new instance of SecretExpander
-func NewSecretExpander(secretsClient *secretsapi.Client, prj *Project, prompt prompt.Prompter, cfg keypairs.Configurable) *SecretExpander {
+func NewSecretExpander(secretsClient *secretsapi.Client, prj *Project, prompt prompt.Prompter, cfg keypairs.Configurable, auth *authentication.Auth) *SecretExpander {
 	return &SecretExpander{
 		secretsClient: secretsClient,
 		cachedSecrets: map[string]string{},
 		project:       prj,
 		prompt:        prompt,
 		cfg:           cfg,
+		auth:          auth,
 	}
 }
 
 // NewSecretQuietExpander creates an Expander which can retrieve and decrypt stored user secrets.
-func NewSecretQuietExpander(secretsClient *secretsapi.Client, cfg keypairs.Configurable) ExpanderFunc {
-	secretsExpander := NewSecretExpander(secretsClient, nil, nil, cfg)
+func NewSecretQuietExpander(secretsClient *secretsapi.Client, cfg keypairs.Configurable, auth *authentication.Auth) ExpanderFunc {
+	secretsExpander := NewSecretExpander(secretsClient, nil, nil, cfg, auth)
 	return secretsExpander.Expand
 }
 
 // NewSecretPromptingExpander creates an Expander which can retrieve and decrypt stored user secrets. Additionally,
 // it will prompt the user to provide a value for a secret -- in the event none is found -- and save the new
 // value with the secrets service.
-func NewSecretPromptingExpander(secretsClient *secretsapi.Client, prompt prompt.Prompter, cfg keypairs.Configurable) ExpanderFunc {
-	secretsExpander := NewSecretExpander(secretsClient, nil, prompt, cfg)
+func NewSecretPromptingExpander(secretsClient *secretsapi.Client, prompt prompt.Prompter, cfg keypairs.Configurable, auth *authentication.Auth) ExpanderFunc {
+	secretsExpander := NewSecretExpander(secretsClient, nil, prompt, cfg, auth)
 	return secretsExpander.ExpandWithPrompt
 }
 
@@ -77,7 +79,7 @@ func (e *SecretExpander) KeyPair() (keypairs.Keypair, error) {
 		return nil, locale.NewError("secrets_err_expand_noproject")
 	}
 
-	if !authentication.LegacyGet().Authenticated() {
+	if !e.auth.Authenticated() {
 		return nil, locale.NewInputError("secrets_err_not_authenticated")
 	}
 
@@ -99,7 +101,7 @@ func (e *SecretExpander) Organization() (*mono_models.Organization, error) {
 	}
 	var err error
 	if e.organization == nil {
-		e.organization, err = model.FetchOrgByURLName(e.project.Owner())
+		e.organization, err = model.FetchOrgByURLName(e.project.Owner(), e.auth)
 		if err != nil {
 			return nil, err
 		}
@@ -115,7 +117,7 @@ func (e *SecretExpander) Project() (*mono_models.Project, error) {
 	}
 	var err error
 	if e.remoteProject == nil {
-		e.remoteProject, err = model.FetchProjectByName(e.project.Owner(), e.project.Name())
+		e.remoteProject, err = model.LegacyFetchProjectByName(e.project.Owner(), e.project.Name())
 		if err != nil {
 			return nil, err
 		}
@@ -188,7 +190,7 @@ func (e *SecretExpander) FetchDefinition(name string, isUser bool) (*secretsMode
 // FindSecret will find the secret appropriate for the current project
 func (e *SecretExpander) FindSecret(name string, isUser bool) (*secretsModels.UserSecret, error) {
 	owner := e.project.Owner()
-	allowed, err := access.Secrets(owner)
+	allowed, err := access.Secrets(owner, e.auth)
 	if err != nil {
 		return nil, err
 	}
@@ -347,7 +349,7 @@ func (e *SecretExpander) ExpandWithPrompt(_ string, category string, name string
 		return "", err
 	}
 
-	err = secrets.Save(e.secretsClient, keypair, org, pj, isUser, name, value)
+	err = secrets.Save(e.secretsClient, keypair, org, pj, isUser, name, value, e.auth)
 
 	if err != nil {
 		return "", err

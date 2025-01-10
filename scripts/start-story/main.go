@@ -6,12 +6,13 @@ import (
 
 	"github.com/ActiveState/cli/internal/environment"
 	"github.com/ActiveState/cli/internal/errs"
-	"github.com/ActiveState/cli/internal/exeutils"
+	"github.com/ActiveState/cli/internal/osutils"
 	wc "github.com/ActiveState/cli/scripts/internal/workflow-controllers"
 	wh "github.com/ActiveState/cli/scripts/internal/workflow-helpers"
 	"github.com/andygrunwald/go-jira"
 	"github.com/blang/semver"
 	"github.com/google/go-github/v45/github"
+	"github.com/thoas/go-funk"
 )
 
 func main() {
@@ -22,6 +23,7 @@ func main() {
 
 type Meta struct {
 	Version           semver.Version
+	JiraIssue         *jira.Issue
 	JiraVersion       string
 	VersionPRName     string
 	VersionBranchName string
@@ -68,7 +70,7 @@ func run() error {
 		if err != nil {
 			return errs.Wrap(err, "failed to parse Jira key from branch name")
 		}
-		if strings.ToLower(detectedIssueID) != strings.ToLower(jiraIssueID) {
+		if !strings.EqualFold(detectedIssueID, jiraIssueID) {
 			return errs.New("Branch name contains story ID %s, but story being targeted is %s", detectedIssueID, jiraIssueID)
 		}
 	}
@@ -101,19 +103,31 @@ func run() error {
 		return nil
 	}
 
-	stdout, stderr, err := exeutils.ExecSimpleFromDir(environment.GetRootPathUnsafe(), "git", []string{"checkout", ref}, nil)
+	stdout, stderr, err := osutils.ExecSimpleFromDir(environment.GetRootPathUnsafe(), "git", []string{"checkout", ref}, nil)
 	if err != nil {
 		return errs.Wrap(err, "failed to checkout base ref, stdout:\n%s\nstderr:\n%s", stdout, stderr)
 	}
-	stdout, stderr, err = exeutils.ExecSimpleFromDir(environment.GetRootPathUnsafe(), "git", []string{"branch", branchName}, nil)
+	stdout, stderr, err = osutils.ExecSimpleFromDir(environment.GetRootPathUnsafe(), "git", []string{"pull", "--rebase"}, nil)
+	if err != nil {
+		return errs.Wrap(err, "failed to pull latest changes, stdout:\n%s\nstderr:\n%s", stdout, stderr)
+	}
+	stdout, stderr, err = osutils.ExecSimpleFromDir(environment.GetRootPathUnsafe(), "git", []string{"branch", branchName}, nil)
 	if err != nil {
 		return errs.Wrap(err, "failed to create branch, stdout:\n%s\nstderr:\n%s", stdout, stderr)
 	}
-	stdout, stderr, err = exeutils.ExecSimpleFromDir(environment.GetRootPathUnsafe(), "git", []string{"checkout", branchName}, nil)
+	stdout, stderr, err = osutils.ExecSimpleFromDir(environment.GetRootPathUnsafe(), "git", []string{"checkout", branchName}, nil)
 	if err != nil {
 		return errs.Wrap(err, "failed to checkout branch, stdout:\n%s\nstderr:\n%s", stdout, stderr)
 	}
 	finish()
+
+	if meta.JiraIssue.Fields.Status.Name == wh.JiraStatusTodo || meta.JiraIssue.Fields.Status.Name == wh.JiraStatusPending {
+		finish = wc.PrintStart("Updating jira issue to In Progress")
+		if err := wh.UpdateJiraStatus(jiraClient, meta.JiraIssue, wh.JiraStatusInProgress); err != nil {
+			return errs.Wrap(err, "failed to update Jira status")
+		}
+		finish()
+	}
 
 	wc.Print("All Done")
 
@@ -128,6 +142,20 @@ func fetchMeta(ghClient *github.Client, jiraClient *jira.Client, jiraIssueID str
 		return Meta{}, errs.Wrap(err, "failed to get Jira issue")
 	}
 	finish()
+
+	if len(jiraIssue.Fields.FixVersions) == 0 || jiraIssue.Fields.FixVersions[0] == nil {
+		return Meta{}, errs.New("Jira issue does not have a fix version")
+	}
+	fixVersion := jiraIssue.Fields.FixVersions[0]
+
+	if fixVersion.Archived != nil && *fixVersion.Archived || fixVersion.Released != nil && *fixVersion.Released {
+		return Meta{}, errs.New("Target issue has fixVersion '%s', which has either been archived or released\n", fixVersion.Name)
+	}
+
+	if !funk.ContainsString([]string{wh.JiraStatusTodo, wh.JiraStatusInProgress, wh.JiraStatusPending}, jiraIssue.Fields.Status.Name) {
+		return Meta{}, errs.New("Story is in the %s state, but only '%s', '%s' and '%s' are valid states to start a story from.",
+			jiraIssue.Fields.Status.Name, wh.JiraStatusTodo, wh.JiraStatusInProgress, wh.JiraStatusPending)
+	}
 
 	finish = wc.PrintStart("Fetching Jira Versions")
 	availableVersions, err := wh.FetchAvailableVersions(jiraClient)
@@ -146,7 +174,7 @@ func fetchMeta(ghClient *github.Client, jiraClient *jira.Client, jiraIssueID str
 	var versionPR *github.PullRequest
 	var versionPRName string
 	if version.NE(wh.VersionMaster) {
-		versionPRName = wh.VersionedPRTitle(version)
+		versionPRName = wh.VersionedPRTitle(version.Version)
 
 		// Retrieve Relevant Fixversion Pr
 		finish = wc.PrintStart("Checking if Version PR with title '%s' exists", versionPRName)
@@ -159,10 +187,11 @@ func fetchMeta(ghClient *github.Client, jiraClient *jira.Client, jiraIssueID str
 	}
 
 	return Meta{
-		Version:           version,
+		Version:           version.Version,
+		JiraIssue:         jiraIssue,
 		JiraVersion:       jiraVersion.Name,
 		VersionPR:         versionPR,
 		VersionPRName:     versionPRName,
-		VersionBranchName: wh.VersionedBranchName(version),
+		VersionBranchName: wh.VersionedBranchName(version.Version),
 	}, nil
 }

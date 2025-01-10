@@ -2,7 +2,7 @@ package integration
 
 import (
 	"fmt"
-	"io/ioutil"
+	"os"
 	"path/filepath"
 	"regexp"
 
@@ -29,11 +29,12 @@ func (suite *UpdateIntegrationTestSuite) TestLocked() {
 	defer cfg.Close()
 
 	pjfile.SetPath(filepath.Join(ts.Dirs.Work, constants.ConfigFileName))
-	pjfile.Save(cfg)
+	err = pjfile.Save(cfg)
+	suite.Require().NoError(err)
 
 	cp := ts.SpawnWithOpts(
-		e2e.WithArgs("update", "lock"),
-		e2e.AppendEnv(suite.env(false, false)...),
+		e2e.OptArgs("update", "lock"),
+		e2e.OptAppendEnv(suite.env(false, false)...),
 	)
 
 	cp.Expect("Version locked at")
@@ -45,7 +46,7 @@ func (suite *UpdateIntegrationTestSuite) TestLocked() {
 func (suite *UpdateIntegrationTestSuite) TestLockedChannel() {
 	suite.OnlyRunForTags(tagsuite.Update)
 	targetBranch := "release"
-	if constants.BranchName == "release" {
+	if constants.ChannelName == "release" {
 		targetBranch = "master"
 	}
 	tests := []struct {
@@ -88,11 +89,12 @@ func (suite *UpdateIntegrationTestSuite) TestLockedChannel() {
 
 			yamlPath := filepath.Join(ts.Dirs.Work, constants.ConfigFileName)
 			pjfile.SetPath(yamlPath)
-			pjfile.Save(cfg)
+			err = pjfile.Save(cfg)
+			suite.Require().NoError(err)
 
 			cp := ts.SpawnWithOpts(
-				e2e.WithArgs("update", "lock", "--set-channel", tt.lock),
-				e2e.AppendEnv(suite.env(false, false)...),
+				e2e.OptArgs("update", "lock", "--set-channel", tt.lock),
+				e2e.OptAppendEnv(suite.env(false, false)...),
 			)
 			cp.Expect("Version locked at")
 			cp.Expect(tt.expectedChannel + "@")
@@ -103,9 +105,10 @@ func (suite *UpdateIntegrationTestSuite) TestLockedChannel() {
 			suite.Contains(string(yamlContents), tt.lock)
 
 			if tt.expectLockError {
-				cp = ts.SpawnWithOpts(e2e.WithArgs("--version"), e2e.AppendEnv(suite.env(true, false)...))
+				cp = ts.SpawnWithOpts(e2e.OptArgs("--version"), e2e.OptAppendEnv(suite.env(true, false)...))
 				cp.Expect("This project is locked at State Tool version")
 				cp.ExpectExitCode(1)
+				ts.IgnoreLogErrors()
 				return
 			}
 		})
@@ -131,7 +134,7 @@ func (suite *UpdateIntegrationTestSuite) TestUpdateLockedConfirmation() {
 			suite.OnlyRunForTags(tagsuite.Update)
 			pjfile := projectfile.Project{
 				Project: lockedProjectURL(),
-				Lock:    fmt.Sprintf("%s@%s", constants.BranchName, constants.Version),
+				Lock:    fmt.Sprintf("%s@%s", constants.ChannelName, constants.Version),
 			}
 
 			ts := e2e.New(suite.T(), false)
@@ -142,25 +145,27 @@ func (suite *UpdateIntegrationTestSuite) TestUpdateLockedConfirmation() {
 			defer cfg.Close()
 
 			pjfile.SetPath(filepath.Join(ts.Dirs.Work, constants.ConfigFileName))
-			pjfile.Save(cfg)
+			err = pjfile.Save(cfg)
+			suite.Require().NoError(err)
 
 			args := []string{"update", "lock"}
 			if tt.Forced {
-				args = append(args, "--force")
+				args = append(args, "--non-interactive")
 			}
 			cp := ts.SpawnWithOpts(
-				e2e.WithArgs(args...),
-				e2e.AppendEnv(suite.env(true, true)...),
+				e2e.OptArgs(args...),
+				e2e.OptAppendEnv(suite.env(true, true)...),
 			)
 			cp.Expect("sure you want")
 			if tt.Confirm || tt.Forced {
-				cp.Send("y")
+				cp.SendLine("y")
 				cp.Expect("Version locked at")
 			} else {
-				cp.Send("n")
+				cp.SendLine("n")
 				cp.Expect("Cancelling")
 			}
 			cp.ExpectNotExitCode(0)
+			ts.IgnoreLogErrors()
 		})
 	}
 }
@@ -179,27 +184,47 @@ func (suite *UpdateIntegrationTestSuite) TestLockUnlock() {
 	defer cfg.Close()
 
 	pjfile.SetPath(filepath.Join(ts.Dirs.Work, constants.ConfigFileName))
-	pjfile.Save(cfg)
+	err = pjfile.Save(cfg)
+	suite.Require().NoError(err)
 
 	cp := ts.SpawnWithOpts(
-		e2e.WithArgs("update", "lock", "--force"),
-		e2e.AppendEnv(suite.env(false, false)...),
+		e2e.OptArgs("update", "lock", "--non-interactive"),
+		e2e.OptAppendEnv(suite.env(false, false)...),
 	)
 	cp.Expect("locked at")
 
-	data, err := ioutil.ReadFile(pjfile.Path())
+	data, err := os.ReadFile(pjfile.Path())
 	suite.Require().NoError(err)
 
 	lockRegex := regexp.MustCompile(`(?m)^lock:.*`)
 	suite.Assert().True(lockRegex.Match(data), "lock info was not written to "+pjfile.Path())
 
 	cp = ts.SpawnWithOpts(
-		e2e.WithArgs("update", "unlock", "--force"),
-		e2e.AppendEnv(suite.env(false, false)...),
+		e2e.OptArgs("update", "unlock", "-n"),
+		e2e.OptAppendEnv(suite.env(false, false)...),
 	)
+	cp.Expect("Continuing because State Tool is running in non-interactive mode")
 	cp.Expect("unlocked")
 
-	data, err = ioutil.ReadFile(pjfile.Path())
+	data, err = os.ReadFile(pjfile.Path())
 	suite.Require().NoError(err)
 	suite.Assert().False(lockRegex.Match(data), "lock info was not removed from "+pjfile.Path())
+	// Ignore log errors here as the project we are using in this test does not
+	// actually exist. So there will be some errors related to fetching the
+	// project into.
+	ts.IgnoreLogErrors()
+}
+
+func (suite *UpdateIntegrationTestSuite) TestJSON() {
+	suite.OnlyRunForTags(tagsuite.Update, tagsuite.JSON)
+	ts := e2e.New(suite.T(), false)
+	defer ts.Close()
+
+	ts.PrepareEmptyProject()
+
+	cp := ts.Spawn("update", "lock", "-o", "json")
+	cp.Expect(`"channel":`)
+	cp.Expect(`"version":`)
+	cp.ExpectExitCode(0)
+	AssertValidJSON(suite.T(), cp)
 }

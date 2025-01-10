@@ -4,23 +4,20 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/go-openapi/strfmt"
 	"github.com/stretchr/testify/assert"
 
 	"github.com/ActiveState/cli/internal/environment"
 )
 
-func newUUID(uuid string) *strfmt.UUID {
-	u := strfmt.UUID(uuid)
-	return &u
-}
-
 func TestParseNamespace(t *testing.T) {
 	_, err := ParseNamespace("valid/namespace")
 	assert.NoError(t, err, "should parse a valid namespace")
 
-	_, err = ParseNamespace("valid/namespace#a10-b11c12-d13e14-f15")
+	_, err = ParseNamespace("valid/namespace#00000000-0000-0000-0000-000000000000")
 	assert.NoError(t, err, "should parse a valid namespace with 'uuid'")
+
+	_, err = ParseNamespace("valid/namespace#a10-b11c12-d13e14-f15")
+	assert.Error(t, err, "should fail to parse an invalid 'uuid'")
 
 	_, err = ParseNamespace("valid/namespace#")
 	assert.NoError(t, err, "should parse a valid namespace with empty uuid")
@@ -41,13 +38,6 @@ func TestParseProjectNoOwner(t *testing.T) {
 	assert.Equal(t, parsed.Project, "project")
 	assert.Empty(t, parsed.CommitID)
 	assert.True(t, parsed.AllowOmitOwner)
-
-	parsed, err = ParseProjectNoOwner("project#a10-b11c12-d13e14-f15")
-	assert.NoError(t, err, "should be able to parse project part of namspace")
-	assert.Empty(t, parsed.Owner)
-	assert.Equal(t, parsed.Project, "project")
-	assert.Equal(t, *parsed.CommitID, strfmt.UUID("a10-b11c12-d13e14-f15"))
-	assert.True(t, parsed.AllowOmitOwner)
 }
 
 func TestParseNamespaceOrConfigfile(t *testing.T) {
@@ -64,7 +54,7 @@ func TestParseNamespaceOrConfigfile(t *testing.T) {
 		expected   *Namespaced
 	}{
 		{"InvalidConfigfile", invalidConfigFile, nil},
-		{"FromConfigFile", validConfigFile, &Namespaced{Owner: "ActiveState", Project: "CodeIntel", CommitID: newUUID("00000000-0000-0000-0000-00000d7ebc72")}},
+		{"FromConfigFile", validConfigFile, &Namespaced{Owner: "ActiveState", Project: "CodeIntel"}},
 	}
 
 	for _, tt := range tests {

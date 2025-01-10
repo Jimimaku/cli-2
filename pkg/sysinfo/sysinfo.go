@@ -15,12 +15,13 @@ const VersionOverrideEnvVar = "ACTIVESTATE_CLI_OSVERSION_OVERRIDE"
 
 // Cache keys used for storing/retrieving computed system information.
 const (
-	osVersionInfoCacheKey = "osVersionInfo"
-	libcInfoCacheKey      = "libcInfo"
-	compilersCacheKey     = "compilers"
+	osVersionInfoCacheKey     = "osVersionInfo"
+	libcInfoCacheKey          = "libcInfo"
+	requestedLibcInfoCacheKey = "requestedLibcInfo"
+	compilersCacheKey         = "compilers"
 )
 
-var versionRegex = regexp.MustCompile("^(\\d+)\\D(\\d+)(?:\\D(\\d+))?")
+var versionRegex = regexp.MustCompile(`^(\d+)\D(\d+)(?:\D(\d+))?`)
 
 // OsInfo represents an OS returned by OS().
 type OsInfo int
@@ -123,6 +124,10 @@ type LibcInfo struct {
 	Minor int          // minor version number
 }
 
+func (l LibcInfo) Version() string {
+	return fmt.Sprintf("%d.%d", l.Major, l.Minor)
+}
+
 // CompilerNameInfo reprents a compiler toolchain name.
 type CompilerNameInfo int
 
@@ -167,7 +172,7 @@ func getCompilerVersion(args []string) (int, int, error) {
 	if err != nil {
 		return 0, 0, nil
 	}
-	regex := regexp.MustCompile("(\\d+)\\D(\\d+)\\D\\d+")
+	regex := regexp.MustCompile(`(\d+)\D(\d+)\D\d+`)
 	parts := regex.FindStringSubmatch(string(cc))
 	if len(parts) != 3 {
 		return 0, 0, fmt.Errorf("Unable to parse version string '%s'", cc)
@@ -206,9 +211,5 @@ func parseVersionInfo(v string) (*VersionInfo, error) {
 		}
 	}
 
-	return &VersionInfo{
-		Major: major,
-		Minor: minor,
-		Micro: micro,
-	}, nil
+	return &VersionInfo{v, major, minor, micro}, nil
 }

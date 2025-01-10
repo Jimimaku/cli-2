@@ -2,18 +2,20 @@ package server
 
 import (
 	"context"
+	"errors"
 	"net"
 	"strconv"
 	"time"
 
+	"github.com/99designs/gqlgen/graphql"
 	"github.com/99designs/gqlgen/graphql/handler"
 	"github.com/99designs/gqlgen/graphql/handler/extension"
-	"github.com/99designs/gqlgen/graphql/handler/lru"
 	"github.com/99designs/gqlgen/graphql/handler/transport"
 	"github.com/ActiveState/cli/internal/analytics/client/sync"
 	"github.com/ActiveState/cli/pkg/platform/authentication"
 	"github.com/labstack/echo/v4"
 	"github.com/labstack/echo/v4/middleware"
+	"github.com/vektah/gqlparser/v2/gqlerror"
 
 	"github.com/ActiveState/cli/cmd/state-svc/internal/resolver"
 	genserver "github.com/ActiveState/cli/cmd/state-svc/internal/server/generated"
@@ -97,12 +99,18 @@ func (s *Server) Shutdown() error {
 
 func newGraphServer(r *resolver.Resolver) *handler.Server {
 	graphServer := handler.NewDefaultServer(genserver.NewExecutableSchema(genserver.Config{Resolvers: r}))
-	graphServer.AddTransport(&transport.Websocket{})
-	graphServer.SetQueryCache(lru.New(1000))
-	graphServer.Use(extension.Introspection{})
-	graphServer.Use(extension.AutomaticPersistedQuery{
-		Cache: lru.New(100),
+	graphServer.SetErrorPresenter(func(ctx context.Context, err error) *gqlerror.Error {
+		errMsg := errs.JoinMessage(err)
+		logging.Warning("graphql server returning error: %s", errMsg)
+		var gqlErr *gqlerror.Error
+		if !errors.As(err, &gqlErr) {
+			gqlErr = gqlerror.WrapPath(graphql.GetPath(ctx), err)
+		}
+		gqlErr.Message = errMsg
+		return gqlErr
 	})
+	graphServer.AddTransport(&transport.Websocket{})
+	graphServer.Use(extension.Introspection{})
 	return graphServer
 }
 

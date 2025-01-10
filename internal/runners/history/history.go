@@ -1,30 +1,37 @@
 package history
 
 import (
+	"github.com/go-openapi/strfmt"
+
+	"github.com/ActiveState/cli/internal/errs"
 	"github.com/ActiveState/cli/internal/locale"
 	"github.com/ActiveState/cli/internal/output"
 	"github.com/ActiveState/cli/internal/primer"
-	"github.com/ActiveState/cli/pkg/cmdlets/commit"
+	"github.com/ActiveState/cli/internal/runbits/commit"
+	"github.com/ActiveState/cli/pkg/localcommit"
 	"github.com/ActiveState/cli/pkg/platform/api/mono/mono_models"
+	"github.com/ActiveState/cli/pkg/platform/authentication"
 	"github.com/ActiveState/cli/pkg/platform/model"
 	"github.com/ActiveState/cli/pkg/project"
-	"github.com/go-openapi/strfmt"
 )
 
 type primeable interface {
 	primer.Projecter
 	primer.Outputer
+	primer.Auther
 }
 
 type History struct {
 	project *project.Project
 	out     output.Outputer
+	auth    *authentication.Auth
 }
 
 func NewHistory(prime primeable) *History {
 	return &History{
 		prime.Project(),
 		prime.Output(),
+		prime.Auth(),
 	}
 }
 
@@ -35,34 +42,39 @@ func (h *History) Run(params *HistoryParams) error {
 	if h.project == nil {
 		return locale.NewInputError("err_history_no_project", "No project found. Please run this command in a project directory")
 	}
+	h.out.Notice(locale.Tr("operating_message", h.project.NamespaceString(), h.project.Dir()))
 
-	localCommitID := h.project.CommitUUID()
-
-	var latestRemoteID *strfmt.UUID
-	if !h.project.IsHeadless() {
-		remoteBranch, err := model.BranchForProjectNameByName(h.project.Owner(), h.project.Name(), h.project.BranchName())
-		if err != nil {
-			return locale.WrapError(err, "err_history_remote_branch", "Could not get branch by local branch name")
-		}
-
-		latestRemoteID, err = model.CommonParent(remoteBranch.CommitID, &localCommitID)
-		if err != nil {
-			return locale.WrapError(err, "err_history_common_parent", "Could not determine common parent commit")
-		}
+	localCommitID, err := localcommit.Get(h.project.Dir())
+	if err != nil {
+		return errs.Wrap(err, "Unable to get local commit")
 	}
 
-	commits, err := model.CommitHistoryFromID(localCommitID)
+	if h.project.IsHeadless() {
+		return locale.NewInputError("err_history_headless", "Cannot get history for headless project. Please visit {{.V0}} to convert your project and try again.", h.project.URL())
+	}
+
+	remoteBranch, err := model.BranchForProjectNameByName(h.project.Owner(), h.project.Name(), h.project.BranchName())
+	if err != nil {
+		return locale.WrapError(err, "err_history_remote_branch", "Could not get branch by local branch name")
+	}
+
+	latestRemoteID, err := model.CommonParent(remoteBranch.CommitID, &localCommitID, h.auth)
+	if err != nil {
+		return locale.WrapError(err, "err_history_common_parent", "Could not determine common parent commit")
+	}
+
+	commits, err := model.CommitHistoryFromID(localCommitID, h.auth)
 	if err != nil {
 		return locale.WrapError(err, "err_commit_history_commit_id", "Could not get commit history from commit ID.")
 	}
 
 	if len(commits) == 0 {
-		h.out.Print(locale.Tr("no_commits", h.project.Namespace().String()))
+		h.out.Print(output.Prepare(locale.Tr("no_commits", h.project.Namespace().String()), []byte("[]")))
 		return nil
 	}
 
 	authorIDs := authorIDsForCommits(commits)
-	orgs, err := model.FetchOrganizationsByIDs(authorIDs)
+	orgs, err := model.FetchOrganizationsByIDs(authorIDs, h.auth)
 	if err != nil {
 		return err
 	}

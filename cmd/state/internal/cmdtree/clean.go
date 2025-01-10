@@ -19,7 +19,7 @@ func newCleanCommand(prime *primer.Values) *captain.Command {
 			prime.Output().Print(ccmd.Help())
 			return nil
 		},
-	).SetGroup(UtilsGroup)
+	).SetGroup(UtilsGroup).SetSupportsStructuredOutput()
 }
 
 func newCleanUninstallCommand(prime *primer.Values, globals *globalOptions) *captain.Command {
@@ -31,10 +31,19 @@ func newCleanUninstallCommand(prime *primer.Values, globals *globalOptions) *cap
 		prime,
 		[]*captain.Flag{
 			{
-				Name:        "force",
-				Shorthand:   "f",
-				Description: locale.T("flag_state_clean_uninstall_force_description"),
-				Value:       &params.Force,
+				Name:        "all",
+				Shorthand:   "a",
+				Description: locale.Tl("flag_state_clean_uninstall_all", "Also delete all associated config and cache files"),
+				Value:       &params.All,
+			},
+			{
+				// This option is only used by the Windows uninstall shortcut to ask the user if they wish
+				// to delete everything or keep cache and config. The user is also asked to press Enter
+				// after the uninstall process is scheduled so they may note the printed log file path.
+				Name:        "prompt",
+				Description: "Asks the user if everything should be deleted or to keep cache and config",
+				Hidden:      true, // this is not a user-facing flag
+				Value:       &params.Prompt,
 			},
 		},
 		[]*captain.Argument{},
@@ -44,13 +53,13 @@ func newCleanUninstallCommand(prime *primer.Values, globals *globalOptions) *cap
 				return err
 			}
 
-			params.NonInteractive = globals.NonInteractive // distinct from --force
+			params.Force = globals.Force
 			return runner.Run(&params)
 		},
 	)
 }
 
-func newCleanCacheCommand(prime *primer.Values, globals *globalOptions) *captain.Command {
+func newCleanCacheCommand(prime *primer.Values) *captain.Command {
 	runner := clean.NewCache(prime)
 	params := clean.CacheParams{}
 	return captain.NewCommand(
@@ -68,30 +77,23 @@ func newCleanCacheCommand(prime *primer.Values, globals *globalOptions) *captain
 			},
 		},
 		func(ccmd *captain.Command, _ []string) error {
-			params.Force = globals.NonInteractive
 			return runner.Run(&params)
 		},
 	)
 }
 
-func newCleanConfigCommand(prime *primer.Values) *captain.Command {
+func newCleanConfigCommand(prime *primer.Values, globals *globalOptions) *captain.Command {
 	runner := clean.NewConfig(prime)
 	params := clean.ConfigParams{}
 	return captain.NewCommand(
 		"config",
 		locale.Tl("clean_config_title", "Cleaning Configuration"),
-		locale.T("config_description"),
+		locale.T("clean_config_description"),
 		prime,
-		[]*captain.Flag{
-			{
-				Name:        "force",
-				Shorthand:   "f",
-				Description: locale.T("flag_state_clean_config_force_description"),
-				Value:       &params.Force,
-			},
-		},
+		[]*captain.Flag{},
 		[]*captain.Argument{},
 		func(ccmd *captain.Command, _ []string) error {
+			params.Force = globals.Force
 			return runner.Run(&params)
 		},
 	)

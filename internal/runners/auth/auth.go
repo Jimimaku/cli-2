@@ -6,9 +6,8 @@ import (
 	"github.com/ActiveState/cli/internal/output"
 	"github.com/ActiveState/cli/internal/primer"
 	"github.com/ActiveState/cli/internal/prompt"
-	authlet "github.com/ActiveState/cli/pkg/cmdlets/auth"
+	"github.com/ActiveState/cli/internal/runbits/auth"
 	"github.com/ActiveState/cli/pkg/platform/authentication"
-	"github.com/ActiveState/cli/pkg/platform/model"
 )
 
 type Auth struct {
@@ -54,10 +53,6 @@ func (p AuthParams) verify() error {
 	return nil
 }
 
-type SignupParams struct {
-	Prompt bool
-}
-
 // Run runs our command
 func (a *Auth) Run(params *AuthParams) error {
 	if !a.Authenticated() {
@@ -74,35 +69,33 @@ func (a *Auth) Run(params *AuthParams) error {
 		}
 	}
 
-	data, err := a.userData()
-	if err != nil {
-		return locale.WrapError(err, "err_auth_userdata", "Could not collect information about your account.")
-	}
-
-	a.Outputer.Print(
-		output.NewFormatter(data).
-			WithFormat(output.PlainFormatName, locale.T("logged_in_as", map[string]string{
-				"Name": a.Auth.WhoAmI(),
-			})),
-	)
+	username := a.Auth.WhoAmI()
+	a.Outputer.Print(output.Prepare(
+		locale.T("logged_in_as", map[string]string{"Name": username}),
+		&struct {
+			Username string `json:"username"`
+		}{
+			username,
+		},
+	))
 
 	return nil
 }
 
 func (a *Auth) authenticate(params *AuthParams) error {
 	if params.Prompt || params.Username != "" {
-		return authlet.AuthenticateWithInput(params.Username, params.Password, params.Totp, params.NonInteractive, a.Cfg, a.Outputer, a.Prompter, a.Auth)
+		return auth.AuthenticateWithInput(params.Username, params.Password, params.Totp, a.Cfg, a.Outputer, a.Prompter, a.Auth)
 	}
 
 	if params.Token != "" {
-		return authlet.AuthenticateWithToken(params.Token, a.Auth)
+		return auth.AuthenticateWithToken(params.Token, a.Auth)
 	}
 
 	if params.NonInteractive {
 		return locale.NewInputError("err_auth_needinput")
 	}
 
-	return authlet.AuthenticateWithBrowser(a.Outputer, a.Auth, a.Prompter)
+	return auth.AuthenticateWithBrowser(a.Outputer, a.Auth, a.Prompter, a.Cfg)
 }
 
 func (a *Auth) verifyAuthentication() error {
@@ -110,42 +103,10 @@ func (a *Auth) verifyAuthentication() error {
 		return locale.NewInputError("login_err_auth")
 	}
 
-	a.Outputer.Notice(output.Heading(locale.Tl("authentication_title", "Authentication")))
+	a.Outputer.Notice(output.Title(locale.Tl("authentication_title", "Authentication")))
 	a.Outputer.Notice(locale.T("login_success_welcome_back", map[string]string{
 		"Name": a.Auth.WhoAmI(),
 	}))
 
 	return nil
-}
-
-type userData struct {
-	Username        string `json:"username,omitempty"`
-	URLName         string `json:"urlname,omitempty"`
-	Tier            string `json:"tier,omitempty"`
-	PrivateProjects bool   `json:"privateProjects"`
-}
-
-func (a *Auth) userData() (*userData, error) {
-	username := a.Auth.WhoAmI()
-	organization, err := model.FetchOrgByURLName(username)
-	if err != nil {
-		return nil, err
-	}
-
-	tiers, err := model.FetchTiers()
-	if err != nil {
-		return nil, err
-	}
-
-	tier := organization.Tier
-	privateProjects := false
-	for _, t := range tiers {
-		if tier == t.Name && t.RequiresPayment {
-			privateProjects = true
-			break
-		}
-
-	}
-
-	return &userData{username, organization.URLname, tier, privateProjects}, nil
 }

@@ -1,13 +1,11 @@
 package integration
 
 import (
-	"runtime"
 	"testing"
-	"time"
 
-	"github.com/stretchr/testify/suite"
-
+	"github.com/ActiveState/cli/internal/constants"
 	"github.com/ActiveState/cli/internal/testhelpers/e2e"
+	"github.com/ActiveState/cli/internal/testhelpers/suite"
 	"github.com/ActiveState/cli/internal/testhelpers/tagsuite"
 )
 
@@ -28,41 +26,6 @@ func (suite *BundleIntegrationTestSuite) TestBundle_listingSimple() {
 	cp.ExpectExitCode(0)
 }
 
-func (suite *BundleIntegrationTestSuite) TestBundle_project() {
-	suite.OnlyRunForTags(tagsuite.Bundle)
-	ts := e2e.New(suite.T(), false)
-	defer ts.Close()
-
-	cp := ts.Spawn("bundles", "--namespace", "ActiveState/Perl-5.32")
-	cp.Expect("Name")
-	cp.Expect("Desktop-Installer-Tools")
-	cp.ExpectExitCode(0)
-}
-
-func (suite *BundleIntegrationTestSuite) TestBundle_name() {
-	suite.OnlyRunForTags(tagsuite.Bundle)
-	ts := e2e.New(suite.T(), false)
-	defer ts.Close()
-
-	suite.PrepareActiveStateYAML(ts)
-
-	cp := ts.Spawn("bundles", "--bundle", "Desktop")
-	cp.Expect("Name")
-	cp.Expect("Desktop-Installer-Tools")
-	cp.ExpectExitCode(0)
-}
-
-func (suite *BundleIntegrationTestSuite) TestBundle_project_name() {
-	suite.OnlyRunForTags(tagsuite.Bundle)
-	ts := e2e.New(suite.T(), false)
-	defer ts.Close()
-
-	cp := ts.Spawn("bundles", "--namespace", "ActiveState/Perl-5.32", "--bundle", "Desktop")
-	cp.Expect("Name")
-	cp.Expect("Desktop-Installer-Tools")
-	cp.ExpectExitCode(0)
-}
-
 func (suite *BundleIntegrationTestSuite) TestBundle_project_name_noData() {
 	suite.OnlyRunForTags(tagsuite.Bundle)
 	ts := e2e.New(suite.T(), false)
@@ -73,14 +36,22 @@ func (suite *BundleIntegrationTestSuite) TestBundle_project_name_noData() {
 	cp.ExpectExitCode(0)
 }
 
-func (suite *BundleIntegrationTestSuite) TestBundle_project_invalid() {
+func (suite *BundleIntegrationTestSuite) TestBundle_install_uninstall() {
 	suite.OnlyRunForTags(tagsuite.Bundle)
 	ts := e2e.New(suite.T(), false)
 	defer ts.Close()
+	ts.PrepareProject("ActiveState-CLI/small-python", "5a1e49e5-8ceb-4a09-b605-ed334474855b")
 
-	cp := ts.Spawn("bundles", "--namespace", "junk/junk")
-	cp.ExpectLongString("The requested project junk/junk could not be found.")
-	cp.ExpectExitCode(1)
+	cp := ts.Spawn("config", "set", constants.AsyncRuntimeConfig, "true")
+	cp.ExpectExitCode(0)
+
+	cp = ts.Spawn("bundles", "install", "python-module-build-support")
+	cp.Expect("project has been updated")
+	cp.ExpectExitCode(0)
+
+	cp = ts.Spawn("bundles", "uninstall", "python-module-build-support")
+	cp.Expect("project has been updated")
+	cp.ExpectExitCode(0)
 }
 
 func (suite *BundleIntegrationTestSuite) TestBundle_searchSimple() {
@@ -99,114 +70,27 @@ func (suite *BundleIntegrationTestSuite) TestBundle_searchSimple() {
 	for _, expectation := range expectations {
 		cp.Expect(expectation)
 	}
+	cp.Send("q")
 	cp.ExpectExitCode(0)
-}
-
-func (suite *BundleIntegrationTestSuite) TestBundle_searchWithExactTerm() {
-	suite.OnlyRunForTags(tagsuite.Bundle)
-	ts := e2e.New(suite.T(), false)
-	defer ts.Close()
-	suite.PrepareActiveStateYAML(ts)
-
-	cp := ts.Spawn("bundles", "search", "Utilities", "--exact-term")
-	expectations := []string{
-		"Name",
-		"Utilities",
-		"1.00",
-	}
-	for _, expectation := range expectations {
-		cp.Expect(expectation)
-	}
-	cp.ExpectExitCode(0)
-}
-
-func (suite *BundleIntegrationTestSuite) TestBundle_searchWithExactTermWrongTerm() {
-	suite.OnlyRunForTags(tagsuite.Bundle)
-	ts := e2e.New(suite.T(), false)
-	defer ts.Close()
-	suite.PrepareActiveStateYAML(ts)
-
-	cp := ts.Spawn("bundles", "search", "xxxUtilitiesxxx", "--exact-term")
-	cp.ExpectLongString("No bundles in our catalog match")
-	cp.ExpectExitCode(1)
-}
-
-func (suite *BundleIntegrationTestSuite) TestBundle_searchWithLang() {
-	suite.OnlyRunForTags(tagsuite.Bundle)
-	ts := e2e.New(suite.T(), false)
-	defer ts.Close()
-	suite.PrepareActiveStateYAML(ts)
-
-	cp := ts.Spawn("bundles", "search", "Utilities", "--language=perl")
-	cp.Expect("Utilities")
-	cp.ExpectExitCode(0)
-}
-
-func (suite *BundleIntegrationTestSuite) TestBundle_searchWithWrongLang() {
-	suite.OnlyRunForTags(tagsuite.Bundle)
-	ts := e2e.New(suite.T(), false)
-	defer ts.Close()
-	suite.PrepareActiveStateYAML(ts)
-
-	cp := ts.Spawn("bundles", "search", "Utilities", "--language=python")
-	cp.ExpectLongString("No bundles in our catalog match")
-	cp.ExpectExitCode(1)
-}
-
-func (suite *BundleIntegrationTestSuite) TestBundle_searchWithBadLang() {
-	suite.OnlyRunForTags(tagsuite.Bundle)
-	ts := e2e.New(suite.T(), false)
-	defer ts.Close()
-	suite.PrepareActiveStateYAML(ts)
-
-	cp := ts.Spawn("bundles", "search", "Utilities", "--language=bad")
-	cp.Expect("Cannot obtain search")
-	cp.ExpectExitCode(1)
-}
-
-func (suite *BundleIntegrationTestSuite) TestBundle_headless_operation() {
-	suite.OnlyRunForTags(tagsuite.Bundle)
-	if runtime.GOOS == "darwin" {
-		suite.T().Skip("Skipping mac for now as the builds are still too unreliable")
-		return
-	}
-	ts := e2e.New(suite.T(), false)
-	defer ts.Close()
-
-	cp := ts.Spawn("activate", "ActiveState/Perl-5.32", "--path", ts.Dirs.Work, "--output=json")
-	cp.ExpectExitCode(0)
-
-	suite.Run("install non-existing", func() {
-		cp := ts.Spawn("bundles", "install", "non-existing")
-		cp.Expect("No results found for search term")
-		cp.ExpectLongString(`Run "state search non-existing" to find alternatives`)
-		cp.Wait()
-	})
-
-	suite.Run("install", func() {
-		cp := ts.Spawn("bundles", "install", "Utilities")
-		cp.ExpectRe("successfully installed", 45*time.Second)
-		cp.Wait()
-	})
-
-	/* Our bundles have only one version currently.
-	suite.Run("install (update)", func() {
-		cp := ts.Spawn("bundles", "install", "Utilities@0.7.6")
-		cp.ExpectRe("(?:bundle updated|being built)")
-		cp.ExpectExitCode(1)
-	})
-	*/
-
-	suite.Run("uninstall", func() {
-		cp := ts.Spawn("bundles", "uninstall", "Utilities")
-		cp.ExpectRe("Bundle uninstalled", 30*time.Second)
-		cp.Wait()
-	})
 }
 
 func (suite *BundleIntegrationTestSuite) PrepareActiveStateYAML(ts *e2e.Session) {
-	asyData := `project: "https://platform.activestate.com/ActiveState/Perl-5.32?commitID=c9b1b41a-a153-46fb-b18d-3caa38e19377"`
-	ts.PrepareActiveStateYAML(asyData)
+	ts.PrepareProject("ActiveState-CLI-Testing/Perl-5.32", "3cbcdcba-df34-49ea-81d0-f1385603037d")
+}
+
+func (suite *BundleIntegrationTestSuite) TestJSON() {
+	suite.OnlyRunForTags(tagsuite.Bundle, tagsuite.JSON)
+	ts := e2e.New(suite.T(), false)
+	defer ts.Close()
+	suite.PrepareActiveStateYAML(ts)
+
+	cp := ts.Spawn("bundles", "search", "Email", "--language", "Perl", "-o", "json")
+	cp.Expect(`"Name":"Email"`)
+	cp.ExpectExitCode(0)
+	AssertValidJSON(suite.T(), cp)
+
+	cp = ts.Spawn("config", "set", constants.AsyncRuntimeConfig, "true")
+	cp.ExpectExitCode(0)
 }
 
 func TestBundleIntegrationTestSuite(t *testing.T) {

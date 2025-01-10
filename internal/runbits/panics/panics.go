@@ -15,11 +15,11 @@ func HandlePanics(recovered interface{}, stack []byte) bool {
 		multilog.Error("Panic: %v", recovered)
 		logging.Debug("Stack: %s", string(stack))
 
-		fmt.Fprintln(os.Stderr, fmt.Sprintf(`An unexpected error occurred while running the State Tool.
+		fmt.Fprintf(os.Stderr, `An unexpected error occurred.
 Error: %v
 Stack trace: %s
 Check the error log for more information: %s
-Please consider reporting your issue on the forums: %s`, recovered, string(stack), logging.FilePath(), constants.ForumsURL))
+Please consider reporting your issue on the forums: %s`, recovered, string(stack), logging.FilePath(), constants.ForumsURL)
 		return true
 	}
 	return false
@@ -33,4 +33,13 @@ func LogPanics(recovered interface{}, stack []byte) bool {
 		return true
 	}
 	return false
+}
+
+// LogAndPanic produces actionable output for panic events (that shouldn't happen) and panics
+func LogAndPanic(recovered interface{}, stack []byte) {
+	if recovered != nil {
+		multilog.Error("Panic: %v", recovered)
+		logging.Debug("Stack: %s", string(stack))
+		panic(recovered) // We're only logging the panic, not interrupting it
+	}
 }

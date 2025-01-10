@@ -4,7 +4,9 @@ import (
 	"github.com/ActiveState/cli/internal/captain"
 	"github.com/ActiveState/cli/internal/locale"
 	"github.com/ActiveState/cli/internal/primer"
+	"github.com/ActiveState/cli/internal/runners/install"
 	"github.com/ActiveState/cli/internal/runners/packages"
+	"github.com/ActiveState/cli/internal/runners/uninstall"
 	"github.com/ActiveState/cli/pkg/platform/model"
 )
 
@@ -39,13 +41,12 @@ func newBundlesCommand(prime *primer.Values) *captain.Command {
 		func(_ *captain.Command, _ []string) error {
 			return runner.Run(params, model.NamespaceBundle)
 		},
-	).SetGroup(PackagesGroup).SetUnstable(true)
+	).SetGroup(PackagesGroup).SetSupportsStructuredOutput().SetUnstable(true)
 }
 
 func newBundleInstallCommand(prime *primer.Values) *captain.Command {
-	runner := packages.NewInstall(prime)
-
-	params := packages.InstallRunParams{}
+	runner := install.New(prime, model.NamespaceBundle)
+	params := install.Params{}
 
 	return captain.NewCommand(
 		"install",
@@ -57,20 +58,26 @@ func newBundleInstallCommand(prime *primer.Values) *captain.Command {
 			{
 				Name:        locale.T("bundle_arg_nameversion"),
 				Description: locale.T("bundle_arg_nameversion_description"),
-				Value:       &params.Package,
+				Value:       &params.Packages,
 				Required:    true,
 			},
 		},
-		func(_ *captain.Command, _ []string) error {
-			return runner.Run(params, model.NamespaceBundle)
+		func(_ *captain.Command, args []string) error {
+			for _, p := range args {
+				_, err := params.Packages.Add(p)
+				if err != nil {
+					return locale.WrapInputError(err, "err_install_packages_args", "Invalid install arguments")
+				}
+			}
+			return runner.Run(params)
 		},
-	)
+	).SetSupportsStructuredOutput()
 }
 
 func newBundleUninstallCommand(prime *primer.Values) *captain.Command {
-	runner := packages.NewUninstall(prime)
+	runner := uninstall.New(prime, model.NamespaceBundle)
 
-	params := packages.UninstallRunParams{}
+	params := uninstall.Params{}
 
 	return captain.NewCommand(
 		"uninstall",
@@ -82,14 +89,19 @@ func newBundleUninstallCommand(prime *primer.Values) *captain.Command {
 			{
 				Name:        locale.T("bundle_arg_name"),
 				Description: locale.T("bundle_arg_name_description"),
-				Value:       &params.Name,
+				Value:       &params.Packages,
 				Required:    true,
 			},
 		},
-		func(_ *captain.Command, _ []string) error {
-			return runner.Run(params, model.NamespaceBundle)
+		func(_ *captain.Command, args []string) error {
+			for _, p := range args {
+				if _, err := params.Packages.Add(p); err != nil {
+					return locale.WrapInputError(err, "err_uninstall_packages_args", "Invalid package uninstall arguments")
+				}
+			}
+			return runner.Run(params)
 		},
-	)
+	).SetSupportsStructuredOutput()
 }
 
 func newBundlesSearchCommand(prime *primer.Values) *captain.Command {
@@ -118,12 +130,12 @@ func newBundlesSearchCommand(prime *primer.Values) *captain.Command {
 			{
 				Name:        locale.T("bundle_arg_name"),
 				Description: locale.T("bundle_arg_name_description"),
-				Value:       &params.Name,
+				Value:       &params.Ingredient,
 				Required:    true,
 			},
 		},
 		func(_ *captain.Command, _ []string) error {
 			return runner.Run(params, model.NamespaceBundle)
 		},
-	)
+	).SetSupportsStructuredOutput()
 }

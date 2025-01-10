@@ -28,7 +28,8 @@ func (p *PrivateKey) Run(params *PrivateKeyParams) error {
 	logging.Debug("Execute")
 
 	if !p.Auth.Authenticated() {
-		return locale.NewInputError("err_command_requires_auth")
+		return locale.NewInputError("err_export_privkey_requires_auth",
+			"You need to be authenticated to run this command. Authenticate by running '[ACTIONABLE]state auth --prompt[/RESET]'.")
 	}
 
 	filepath := keypairs.LocalKeyFilename(p.cfg.ConfigPath(), constants.KeypairLocalFileName)
@@ -42,6 +43,11 @@ func (p *PrivateKey) Run(params *PrivateKeyParams) error {
 		return err
 	}
 
-	p.Outputer.Print(string(contents))
+	p.Outputer.Print(output.Prepare(
+		string(contents),
+		&struct {
+			Value string `json:"value"`
+		}{string(contents)},
+	))
 	return nil
 }

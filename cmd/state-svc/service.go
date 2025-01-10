@@ -12,22 +12,24 @@ import (
 	"github.com/ActiveState/cli/internal/config"
 	"github.com/ActiveState/cli/internal/errs"
 	"github.com/ActiveState/cli/internal/ipc"
+	"github.com/ActiveState/cli/internal/locale"
 	"github.com/ActiveState/cli/internal/logging"
 	"github.com/ActiveState/cli/internal/svcctl"
 	"github.com/ActiveState/cli/pkg/platform/authentication"
 )
 
 type service struct {
-	ctx    context.Context
-	cfg    *config.Instance
-	an     *anaSvc.Client
-	auth   *authentication.Auth
-	server *server.Server
-	ipcSrv *ipc.Server
+	ctx     context.Context
+	cfg     *config.Instance
+	an      *anaSvc.Client
+	auth    *authentication.Auth
+	server  *server.Server
+	ipcSrv  *ipc.Server
+	logFile string
 }
 
-func NewService(ctx context.Context, cfg *config.Instance, an *anaSvc.Client, auth *authentication.Auth) *service {
-	return &service{ctx: ctx, cfg: cfg, an: an, auth: auth}
+func NewService(ctx context.Context, cfg *config.Instance, an *anaSvc.Client, auth *authentication.Auth, logFile string) *service {
+	return &service{ctx: ctx, cfg: cfg, an: an, auth: auth, logFile: logFile}
 }
 
 func (s *service) Start() error {
@@ -52,14 +54,15 @@ func (s *service) Start() error {
 	spath := svcctl.NewIPCSockPathFromGlobals()
 	reqHandlers := []ipc.RequestHandler{ // caller-defined handlers to expand ipc capabilities
 		svcctl.HTTPAddrHandler(portText(s.server)),
-		svcctl.LogFileHandler(logging.FileName()),
-		svcctl.HeartbeatHandler(s.server.Resolver(), s.an),
+		svcctl.LogFileHandler(s.logFile),
+		svcctl.HeartbeatHandler(s.cfg, s.server.Resolver(), s.an),
+		svcctl.ExitCodeHandler(s.cfg, s.server.Resolver(), s.an),
 	}
 	s.ipcSrv = ipc.NewServer(s.ctx, spath, reqHandlers...)
 	err = s.ipcSrv.Start()
 	if err != nil {
 		if errors.Is(err, ipc.ErrInUse) {
-			return errs.Wrap(err, "An existing server instance appears to be in use")
+			return locale.WrapExternalError(err, "err_service_ipc_in_use", "An existing server instance appears to be in use")
 		}
 		return errs.Wrap(err, "Failed to start server")
 	}
