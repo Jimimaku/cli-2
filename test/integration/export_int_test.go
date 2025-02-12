@@ -1,60 +1,23 @@
 package integration
 
 import (
-	"fmt"
+	"bufio"
+	"encoding/json"
+	"os"
+	"path/filepath"
+	"strconv"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/ActiveState/cli/internal/testhelpers/e2e"
+	"github.com/ActiveState/cli/internal/testhelpers/suite"
 	"github.com/ActiveState/cli/internal/testhelpers/tagsuite"
-	"github.com/stretchr/testify/suite"
+	"github.com/ActiveState/termtest"
 )
 
 type ExportIntegrationTestSuite struct {
 	tagsuite.Suite
-}
-
-func (suite *ExportIntegrationTestSuite) TestExport_Export() {
-	suite.OnlyRunForTags(tagsuite.Export)
-	ts := e2e.New(suite.T(), false)
-	defer ts.Close()
-
-	suite.PrepareActiveStateYAML(ts)
-	cp := ts.Spawn("export", "recipe")
-	cp.Expect("{\"camel_flags\":")
-	cp.ExpectExitCode(0)
-}
-
-func (suite *ExportIntegrationTestSuite) TestExport_ExportArg() {
-	suite.OnlyRunForTags(tagsuite.Export)
-	ts := e2e.New(suite.T(), false)
-	defer ts.Close()
-
-	suite.PrepareActiveStateYAML(ts)
-	cp := ts.Spawn("export", "recipe")
-	cp.Expect("{\"camel_flags\":")
-	cp.ExpectExitCode(0)
-}
-
-func (suite *ExportIntegrationTestSuite) TestExport_ExportPlatform() {
-	suite.OnlyRunForTags(tagsuite.Export)
-	ts := e2e.New(suite.T(), false)
-	defer ts.Close()
-
-	suite.PrepareActiveStateYAML(ts)
-	cp := ts.Spawn("export", "recipe", "--platform", "linux")
-	cp.Expect("{\"camel_flags\":")
-	cp.ExpectExitCode(0)
-}
-
-func (suite *ExportIntegrationTestSuite) TestExport_InvalidPlatform() {
-	suite.OnlyRunForTags(tagsuite.Export)
-	ts := e2e.New(suite.T(), false)
-	defer ts.Close()
-
-	suite.PrepareActiveStateYAML(ts)
-	cp := ts.Spawn("export", "recipe", "--platform", "junk")
-	cp.ExpectExitCode(1)
 }
 
 func (suite *ExportIntegrationTestSuite) TestExport_ConfigDir() {
@@ -62,9 +25,9 @@ func (suite *ExportIntegrationTestSuite) TestExport_ConfigDir() {
 	ts := e2e.New(suite.T(), false)
 	defer ts.Close()
 
-	suite.PrepareActiveStateYAML(ts)
 	cp := ts.Spawn("export", "config", "--filter", "junk")
 	cp.ExpectExitCode(1)
+	ts.IgnoreLogErrors()
 }
 
 func (suite *ExportIntegrationTestSuite) TestExport_Config() {
@@ -72,10 +35,9 @@ func (suite *ExportIntegrationTestSuite) TestExport_Config() {
 	ts := e2e.New(suite.T(), false)
 	defer ts.Close()
 
-	suite.PrepareActiveStateYAML(ts)
 	cp := ts.Spawn("export", "config")
 	cp.Expect(`dir: `)
-	cp.ExpectLongString(ts.Dirs.Config, time.Second)
+	cp.Expect(ts.Dirs.Config, termtest.OptExpectTimeout(time.Second))
 	cp.ExpectExitCode(0)
 }
 
@@ -84,24 +46,159 @@ func (suite *ExportIntegrationTestSuite) TestExport_Env() {
 	ts := e2e.New(suite.T(), false)
 	defer ts.Close()
 
-	suite.PrepareActiveStateYAML(ts)
-	asyData := fmt.Sprintf(`project: "https://platform.activestate.com/ActiveState-CLI/Export?branch=main&commitID=5397f645-da8a-4591-b106-9d7fa99545fe"`)
-	ts.PrepareActiveStateYAML(asyData)
-	cp := ts.SpawnWithOpts(
-		e2e.WithArgs("export", "env"),
-		e2e.AppendEnv("ACTIVESTATE_CLI_DISABLE_RUNTIME=false"),
-	)
+	ts.PrepareEmptyProject()
+	cp := ts.Spawn("export", "env")
 	cp.Expect(`PATH: `)
 	cp.ExpectExitCode(0)
 
-	suite.Assert().NotContains(cp.TrimmedSnapshot(), "ACTIVESTATE_ACTIVATED")
+	suite.Assert().NotContains(cp.Output(), "ACTIVESTATE_ACTIVATED")
+}
+
+func (suite *ExportIntegrationTestSuite) TestExport_Log() {
+	suite.OnlyRunForTags(tagsuite.Export)
+	ts := e2e.New(suite.T(), false)
+	defer ts.ClearCache()
+
+	// Populate the log file directory as the log file created by
+	// the export command will be ignored.
+	cp := ts.Spawn("--version")
+	cp.ExpectExitCode(0)
+
+	cp = ts.Spawn("export", "log")
+	cp.Expect(filepath.Join(ts.Dirs.Config, "logs"))
+	cp.ExpectRe(`state-\d+`)
+	cp.Expect(".log")
+	cp.ExpectExitCode(0)
+
+	cp = ts.Spawn("export", "log", "state-svc")
+	cp.Expect(filepath.Join(ts.Dirs.Config, "logs"))
+	cp.ExpectRe(`state-svc-\d+`)
+	cp.Expect(".log")
+	cp.ExpectExitCode(0)
+}
+
+func (suite *ExportIntegrationTestSuite) TestExport_LogIgnore() {
+	suite.OnlyRunForTags(tagsuite.Export)
+	ts := e2e.New(suite.T(), false)
+	defer ts.ClearCache()
+
+	cp := ts.Spawn("config", "--help")
+	cp.ExpectExitCode(0)
+
+	cp = ts.Spawn("config", "set", "--help")
+	cp.ExpectExitCode(0)
+
+	cp = ts.Spawn("projects")
+	cp.ExpectExitCode(0)
+
+	suite.verifyLogIndex(ts, 0, "projects")
+	suite.verifyLogIndex(ts, 1, "config", "set")
+	suite.verifyLogIndex(ts, 2, "config")
+}
+
+func (suite *ExportIntegrationTestSuite) verifyLogIndex(ts *e2e.Session, index int, args ...string) {
+	cp := ts.Spawn("export", "log", "-i", strconv.Itoa(index), "--output", "json")
+	cp.ExpectExitCode(0)
+	data := cp.StrippedSnapshot()
+
+	type log struct {
+		LogFile string `json:"logFile"`
+	}
+
+	var l log
+	err := json.Unmarshal([]byte(data), &l)
+	suite.Require().NoError(err)
+
+	suite.verifyLogFile(l.LogFile, args...)
+}
+
+func (suite *ExportIntegrationTestSuite) verifyLogFile(logFile string, expectedArgs ...string) {
+	f, err := os.Open(logFile)
+	suite.Require().NoError(err)
+
+	scanner := bufio.NewScanner(f)
+	for scanner.Scan() {
+		if !strings.Contains(scanner.Text(), "Args: ") {
+			continue
+		}
+
+		for _, arg := range expectedArgs {
+			if !strings.Contains(scanner.Text(), arg) {
+				suite.Fail("Log file does not contain expected command: %s", arg)
+			}
+		}
+	}
+}
+
+func (suite *ExportIntegrationTestSuite) TestExport_Runtime() {
+	suite.OnlyRunForTags(tagsuite.Export)
+	ts := e2e.New(suite.T(), false)
+
+	ts.PrepareEmptyProject()
+	cp := ts.Spawn("export", "runtime")
+	cp.Expect("Project Path: ")
+	cp.Expect("Runtime Path: ")
+	cp.Expect("Executables Path: ")
+	cp.Expect("Environment Variables:") // intentional lack of trailing space
+	cp.Expect(` - PATH: `)
+	cp.ExpectExitCode(0)
+}
+
+func (suite *ExportIntegrationTestSuite) TestExport_BuildPlan() {
+	suite.OnlyRunForTags(tagsuite.Export)
+	ts := e2e.New(suite.T(), false)
+
+	ts.PrepareEmptyProject()
+	cp := ts.Spawn("export", "buildplan")
+	cp.Expect("Resolving Dependencies")
+	cp.Expect(`{`)
+	cp.Expect(`"buildPlanID":`)
+	cp.Expect(`"terminals":`)
+	cp.Expect(`}`)
+	cp.ExpectExitCode(0)
+}
+
+func (suite *ExportIntegrationTestSuite) TestJSON() {
+	suite.OnlyRunForTags(tagsuite.Export, tagsuite.JSON)
+	ts := e2e.New(suite.T(), false)
+	defer ts.Close()
+
+	cp := ts.Spawn("export", "config", "-o", "json")
+	cp.Expect(`{"dir":`)
+	cp.ExpectExitCode(0)
+	AssertValidJSON(suite.T(), cp)
+
+	ts.PrepareEmptyProject()
+
+	cp = ts.Spawn("export", "env", "-o", "json")
+	cp.ExpectExitCode(0)
+	AssertValidJSON(suite.T(), cp)
+
+	ts.LoginAsPersistentUser()
+	cp = ts.Spawn("export", "jwt", "-o", "json")
+	cp.Expect(`{"value":`)
+	cp.ExpectExitCode(0)
+	AssertValidJSON(suite.T(), cp)
+
+	cp = ts.Spawn("export", "log", "-o", "json")
+	cp.Expect(`{"logFile":"`)
+	cp.Expect(`.log"}`)
+	cp.ExpectExitCode(0)
+	AssertValidJSON(suite.T(), cp)
+
+	cp = ts.Spawn("export", "runtime", "-o", "json")
+	cp.Expect(`{"project":"`)
+	cp.Expect(`"}}`)
+	cp.ExpectExitCode(0)
+	AssertValidJSON(suite.T(), cp)
+
+	cp = ts.Spawn("export", "buildplan", "-o", "json")
+	cp.Expect(`{"`)
+	cp.Expect(`}`)
+	cp.ExpectExitCode(0)
+	// The buildplan is too large for the snapshot to contain valid JSON.
 }
 
 func TestExportIntegrationTestSuite(t *testing.T) {
 	suite.Run(t, new(ExportIntegrationTestSuite))
-}
-
-func (suite *ExportIntegrationTestSuite) PrepareActiveStateYAML(ts *e2e.Session) {
-	asyData := `project: "https://platform.activestate.com/cli-integration-tests/Export"`
-	ts.PrepareActiveStateYAML(asyData)
 }

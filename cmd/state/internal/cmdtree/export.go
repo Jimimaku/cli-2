@@ -8,8 +8,10 @@ import (
 	"github.com/ActiveState/cli/internal/primer"
 	"github.com/ActiveState/cli/internal/runners/export"
 	"github.com/ActiveState/cli/internal/runners/export/config"
+	"github.com/ActiveState/cli/internal/runners/export/deptree"
 	"github.com/ActiveState/cli/internal/runners/export/docs"
 	"github.com/ActiveState/cli/internal/runners/export/ghactions"
+	"github.com/ActiveState/cli/pkg/project"
 )
 
 func newExportCommand(prime *primer.Values) *captain.Command {
@@ -24,42 +26,7 @@ func newExportCommand(prime *primer.Values) *captain.Command {
 		[]*captain.Argument{},
 		func(ccmd *captain.Command, args []string) error {
 			return runner.Run(ccmd)
-		}).SetGroup(UtilsGroup)
-}
-
-func newRecipeCommand(prime *primer.Values) *captain.Command {
-	recipe := export.NewRecipe(prime)
-
-	params := export.RecipeParams{}
-
-	return captain.NewCommand(
-		"recipe",
-		locale.Tl("export_recipe_title", "Exporting Recipe Data"),
-		locale.T("export_recipe_cmd_description"),
-		prime,
-		[]*captain.Flag{
-			{
-				Name:        "pretty",
-				Description: locale.T("export_recipe_flag_pretty"),
-				Value:       &params.Pretty,
-			},
-			{
-				Name:        "platform",
-				Shorthand:   "p",
-				Description: locale.T("export_recipe_flag_platform"),
-				Value:       &params.Platform,
-			},
-		},
-		[]*captain.Argument{
-			{
-				Name:        locale.T("export_recipe_cmd_commitid_arg"),
-				Description: locale.T("export_recipe_cmd_commitid_arg_description"),
-				Value:       &params.CommitID,
-			},
-		},
-		func(_ *captain.Command, _ []string) error {
-			return recipe.Run(&params)
-		}).SetUnstable(true)
+		}).SetGroup(UtilsGroup).SetSupportsStructuredOutput()
 }
 
 func newJWTCommand(prime *primer.Values) *captain.Command {
@@ -76,7 +43,7 @@ func newJWTCommand(prime *primer.Values) *captain.Command {
 		[]*captain.Argument{},
 		func(ccmd *captain.Command, args []string) error {
 			return jwt.Run(&params)
-		})
+		}).SetSupportsStructuredOutput()
 }
 
 func newPrivateKeyCommand(prime *primer.Values) *captain.Command {
@@ -93,7 +60,7 @@ func newPrivateKeyCommand(prime *primer.Values) *captain.Command {
 		[]*captain.Argument{},
 		func(ccmd *captain.Command, args []string) error {
 			return privateKey.Run(&params)
-		})
+		}).SetSupportsStructuredOutput()
 }
 
 func newAPIKeyCommand(prime *primer.Values) *captain.Command {
@@ -117,7 +84,7 @@ func newAPIKeyCommand(prime *primer.Values) *captain.Command {
 		func(ccmd *captain.Command, args []string) error {
 			params.IsAuthed = prime.Auth().Authenticated
 			return apikey.Run(params)
-		})
+		}).SetSupportsStructuredOutput()
 }
 
 func newExportConfigCommand(prime *primer.Values) *captain.Command {
@@ -142,7 +109,7 @@ func newExportConfigCommand(prime *primer.Values) *captain.Command {
 		[]*captain.Argument{},
 		func(ccmd *captain.Command, _ []string) error {
 			return runner.Run(ccmd, &params)
-		}).SetUnstable(true)
+		}).SetSupportsStructuredOutput().SetUnstable(true)
 }
 
 func newExportGithubActionCommand(prime *primer.Values) *captain.Command {
@@ -187,7 +154,7 @@ func newExportEnvCommand(prime *primer.Values) *captain.Command {
 	cmd := captain.NewCommand(
 		"env",
 		locale.Tl("env_docs_title", "Exporting environment"),
-		locale.Tl("env_docs_description", "Export the environment variables assocated with your runtime."),
+		locale.Tl("env_docs_description", "Export the environment variables associated with your runtime."),
 		prime,
 		[]*captain.Flag{},
 		[]*captain.Argument{},
@@ -195,7 +162,211 @@ func newExportEnvCommand(prime *primer.Values) *captain.Command {
 			return runner.Run()
 		})
 
+	cmd.SetSupportsStructuredOutput()
 	cmd.SetUnstable(true)
 
+	return cmd
+}
+
+func newExportLogCommand(prime *primer.Values) *captain.Command {
+	runner := export.NewLog(prime)
+	params := &export.LogParams{}
+
+	cmd := captain.NewCommand(
+		"log",
+		locale.Tl("export_log_title", "Show Log File"),
+		locale.Tl("export_log_description", "Show the path to a State Tool log file"),
+		prime,
+		[]*captain.Flag{
+			{
+				Name:        "index",
+				Shorthand:   "i",
+				Description: locale.Tl("flag_export_log_index", "The 0-based index of the log file to show, starting with the newest"),
+				Value:       &params.Index,
+			},
+		},
+		[]*captain.Argument{
+			{
+				Name:        "prefix",
+				Description: locale.Tl("arg_export_log_prefix", "The prefix of the log file to show (e.g. state or state-svc). The default is 'state'"),
+				Required:    false,
+				Value:       &params.Prefix,
+			},
+		},
+		func(ccmd *captain.Command, _ []string) error {
+			return runner.Run(params)
+		})
+
+	cmd.SetSupportsStructuredOutput()
+
+	return cmd
+}
+
+func newExportRuntimeCommand(prime *primer.Values) *captain.Command {
+	runner := export.NewRuntime(prime)
+	params := &export.RuntimeParams{}
+
+	cmd := captain.NewCommand(
+		"runtime",
+		locale.Tl("export_runtime_title", "Exporting runtime"),
+		locale.Tl("export_runtime_description", "Export the runtime associated with your runtime."),
+		prime,
+		[]*captain.Flag{},
+		[]*captain.Argument{
+			{
+				Name:        "path",
+				Description: locale.Tl("arg_export_runtime_path", "Optional path to your project's runtime if not inside your project"),
+				Required:    false,
+				Value:       &params.Path,
+			},
+		},
+		func(ccmd *captain.Command, _ []string) error {
+			return runner.Run(params)
+		})
+
+	cmd.SetSupportsStructuredOutput()
+	cmd.SetUnstable(true)
+
+	return cmd
+}
+
+func newExportBuildPlanCommand(prime *primer.Values) *captain.Command {
+	runner := export.NewBuildPlan(prime)
+	params := &export.BuildPlanParams{Namespace: &project.Namespaced{}}
+
+	cmd := captain.NewCommand(
+		"buildplan",
+		locale.Tl("export_buildplan_title", "Exporting Build Plan"),
+		locale.Tl("export_buildplan_description", "Export the build plan for your project"),
+		prime,
+		[]*captain.Flag{
+			{
+				Name:        "namespace",
+				Description: locale.Tl("export_buildplan_flags_namespace_description", "The namespace of the project to export the build plan for"),
+				Value:       params.Namespace,
+			},
+			{
+				Name:        "commit",
+				Description: locale.Tl("export_buildplan_flags_commit_description", "The commit ID to export the build plan for"),
+				Value:       &params.CommitID,
+			},
+			{
+				Name:        "target",
+				Description: locale.Tl("export_buildplan_flags_target_description", "The target to export the build plan for"),
+				Value:       &params.Target,
+			},
+		},
+		[]*captain.Argument{},
+		func(_ *captain.Command, _ []string) error {
+			return runner.Run(params)
+		},
+	)
+
+	cmd.SetSupportsStructuredOutput()
+	cmd.SetUnstable(true)
+
+	return cmd
+}
+
+func newExportDepTreeCommand(prime *primer.Values) *captain.Command {
+	cmd := captain.NewCommand(
+		"deptree",
+		locale.Tl("export_dep_tree_title", "Export Dependency Tree"),
+		locale.Tl("export_dep_tree_description", "Export the dependency tree for your project"),
+		prime,
+		[]*captain.Flag{},
+		[]*captain.Argument{},
+		func(ccmd *captain.Command, _ []string) error {
+			prime.Output().Print(ccmd.Help())
+			return nil
+		},
+	)
+	cmd.SetHidden(true) // For development purposes only at the moment
+	cmd.SetUnstable(true)
+	return cmd
+}
+
+func newExportDepTreeArtifactsCommand(prime *primer.Values) *captain.Command {
+	params := deptree.ArtifactParams{Namespace: &project.Namespaced{}}
+	runner := deptree.NewByArtifacts(prime)
+	cmd := captain.NewCommand(
+		"artifacts",
+		locale.Tl("export_dep_tree_title", "Export Dependency Tree"),
+		locale.Tl("export_dep_tree_description", "Export the dependency tree for your project"),
+		prime,
+		[]*captain.Flag{
+			{
+				Name:        "namespace",
+				Description: locale.Tl("export_dep_tree_flags_namespace_description", "The namespace of the project to inspect dependencies for"),
+				Value:       params.Namespace,
+			},
+			{
+				Name:        "commit",
+				Description: locale.Tl("export_dep_tree_flags_commit_description", "The commit ID to inspect dependencies for"),
+				Value:       &params.CommitID,
+			},
+			{
+				Name:        "req",
+				Description: locale.Tl("export_dep_tree_flag_req_description", "Requirement name to filter for"),
+				Value:       &params.Req,
+			},
+			{
+				Name:        "platform",
+				Description: locale.Tl("export_dep_tree_flag_platform_description", "Platform ID to filter for (defaults to host platform)"),
+				Value:       &params.PlatformID,
+			},
+			{
+				Name:        "limit",
+				Description: locale.Tl("export_dep_tree_flag_limit_description", "Limit the recursion level"),
+				Value:       &params.LevelLimit,
+			},
+		},
+		[]*captain.Argument{},
+		func(ccmd *captain.Command, _ []string) error {
+			return runner.Run(params)
+		},
+	)
+	cmd.SetHidden(true) // For development purposes only at the moment
+	cmd.SetUnstable(true)
+	return cmd
+}
+
+func newExportDepTreeIngredientsCommand(prime *primer.Values) *captain.Command {
+	params := deptree.IngredientParams{Namespace: &project.Namespaced{}}
+	runner := deptree.NewByIngredients(prime)
+	cmd := captain.NewCommand(
+		"ingredients",
+		locale.Tl("export_dep_tree_title", "Export Dependency Tree"),
+		locale.Tl("export_dep_tree_description", "Export the dependency tree for your project"),
+		prime,
+		[]*captain.Flag{
+			{
+				Name:        "namespace",
+				Description: locale.Tl("export_dep_tree_flags_namespace_description", "The namespace of the project to inspect dependencies for"),
+				Value:       params.Namespace,
+			},
+			{
+				Name:        "commit",
+				Description: locale.Tl("export_dep_tree_flags_commit_description", "The commit ID to inspect dependencies for"),
+				Value:       &params.CommitID,
+			},
+			{
+				Name:        "req",
+				Description: locale.Tl("export_dep_tree_flag_req_description", "Requirement name to filter for"),
+				Value:       &params.Req,
+			},
+			{
+				Name:        "limit",
+				Description: locale.Tl("export_dep_tree_flag_limit_description", "Limit the recursion level"),
+				Value:       &params.LevelLimit,
+			},
+		},
+		[]*captain.Argument{},
+		func(ccmd *captain.Command, _ []string) error {
+			return runner.Run(params)
+		},
+	)
+	cmd.SetHidden(true) // For development purposes only at the moment
+	cmd.SetUnstable(true)
 	return cmd
 }

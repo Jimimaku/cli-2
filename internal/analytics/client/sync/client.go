@@ -20,23 +20,22 @@ import (
 	configMediator "github.com/ActiveState/cli/internal/mediators/config"
 	"github.com/ActiveState/cli/internal/multilog"
 	"github.com/ActiveState/cli/internal/osutils"
+	"github.com/ActiveState/cli/internal/output"
 	"github.com/ActiveState/cli/internal/rollbar"
-	"github.com/ActiveState/cli/internal/rtutils/p"
+	"github.com/ActiveState/cli/internal/rtutils/ptr"
 	"github.com/ActiveState/cli/internal/singleton/uniqid"
 	"github.com/ActiveState/cli/internal/updater"
 	"github.com/ActiveState/cli/pkg/platform/authentication"
 	"github.com/ActiveState/cli/pkg/sysinfo"
-	ga "github.com/ActiveState/go-ogle-analytics"
 )
 
 type Reporter interface {
 	ID() string
-	Event(category, action, label string, dimensions *dimensions.Values) error
+	Event(category, action, source, label string, dimensions *dimensions.Values) error
 }
 
 // Client instances send analytics events to GA and S3 endpoints without delay. It is only supposed to be used inside the `state-svc`.  All other processes should use the DefaultClient.
 type Client struct {
-	gaClient         *ga.Client
 	customDimensions *dimensions.Values
 	cfg              *config.Instance
 	eventWaitGroup   *sync.WaitGroup
@@ -44,21 +43,23 @@ type Client struct {
 	reporters        []Reporter
 	sequence         int
 	auth             *authentication.Auth
+	source           string
 }
 
 var _ analytics.Dispatcher = &Client{}
 
 // New initializes the analytics instance with all custom dimensions known at this time
-func New(cfg *config.Instance, auth *authentication.Auth) *Client {
+func New(source string, cfg *config.Instance, auth *authentication.Auth, out output.Outputer) *Client {
 	a := &Client{
 		eventWaitGroup: &sync.WaitGroup{},
 		sendReports:    true,
 		auth:           auth,
+		source:         source,
 	}
 
 	installSource, err := storage.InstallSource()
 	if err != nil {
-		multilog.Error("Could not detect installSource: %s", errs.Join(err, " :: ").Error())
+		multilog.Error("Could not detect installSource: %s", errs.JoinMessage(err))
 	}
 
 	deviceID := uniqid.Text()
@@ -93,20 +94,28 @@ func New(cfg *config.Instance, auth *authentication.Auth) *Client {
 		userID = string(*auth.UserID())
 	}
 
+	interactive := false
+	if out != nil {
+		interactive = out.Config().Interactive
+	}
+
 	customDimensions := &dimensions.Values{
-		Version:       p.StrP(constants.Version),
-		BranchName:    p.StrP(constants.BranchName),
-		OSName:        p.StrP(osName),
-		OSVersion:     p.StrP(osVersion),
-		InstallSource: p.StrP(installSource),
-		UniqID:        p.StrP(deviceID),
-		SessionToken:  p.StrP(sessionToken),
-		UpdateTag:     p.StrP(tag),
-		UserID:        p.StrP(userID),
-		Flags:         p.StrP(dimensions.CalculateFlags()),
-		InstanceID:    p.StrP(instanceid.ID()),
-		Command:       p.StrP(osutils.ExecutableName()),
-		Sequence:      p.IntP(0),
+		Version:       ptr.To(constants.Version),
+		ChannelName:   ptr.To(constants.ChannelName),
+		OSName:        ptr.To(osName),
+		OSVersion:     ptr.To(osVersion),
+		InstallSource: ptr.To(installSource),
+		UniqID:        ptr.To(deviceID),
+		SessionToken:  ptr.To(sessionToken),
+		UpdateTag:     ptr.To(tag),
+		UserID:        ptr.To(userID),
+		Flags:         ptr.To(dimensions.CalculateFlags()),
+		InstanceID:    ptr.To(instanceid.ID()),
+		Command:       ptr.To(osutils.ExecutableName()),
+		Sequence:      ptr.To(0),
+		CI:            ptr.To(condition.OnCI()),
+		Interactive:   ptr.To(interactive),
+		ActiveStateCI: ptr.To(condition.InActiveStateCI()),
 	}
 
 	a.customDimensions = customDimensions
@@ -126,7 +135,7 @@ func New(cfg *config.Instance, auth *authentication.Auth) *Client {
 }
 
 func (a *Client) readConfig() {
-	doNotReport := (!a.cfg.Closed() && a.cfg.IsSet(constants.ReportAnalyticsConfig) && !a.cfg.GetBool(constants.ReportAnalyticsConfig)) ||
+	doNotReport := (!a.cfg.Closed() && !a.cfg.GetBool(constants.ReportAnalyticsConfig)) ||
 		strings.ToLower(os.Getenv(constants.DisableAnalyticsEnvVarName)) == "true"
 	a.sendReports = !doNotReport
 	logging.Debug("Sending Google Analytics reports? %v", a.sendReports)
@@ -141,13 +150,13 @@ func (a *Client) Wait() {
 }
 
 // Events returns a channel to feed eventData directly to the report loop
-func (a *Client) report(category, action, label string, dimensions *dimensions.Values) {
+func (a *Client) report(category, action, source, label string, dimensions *dimensions.Values) {
 	if !a.sendReports {
 		return
 	}
 
 	for _, reporter := range a.reporters {
-		if err := reporter.Event(category, action, label, dimensions); err != nil {
+		if err := reporter.Event(category, action, source, label, dimensions); err != nil {
 			logging.Debug(
 				"Reporter failed: %s, category: %s, action: %s, error: %s",
 				reporter.ID(), category, action, errs.JoinMessage(err),
@@ -156,7 +165,7 @@ func (a *Client) report(category, action, label string, dimensions *dimensions.V
 	}
 }
 
-func (a *Client) Event(category string, action string, dims ...*dimensions.Values) {
+func (a *Client) Event(category, action string, dims ...*dimensions.Values) {
 	a.EventWithLabel(category, action, "", dims...)
 }
 
@@ -171,7 +180,20 @@ func mergeDimensions(target *dimensions.Values, dims ...*dimensions.Values) *dim
 	return actualDims
 }
 
-func (a *Client) EventWithLabel(category string, action, label string, dims ...*dimensions.Values) {
+func (a *Client) EventWithLabel(category, action, label string, dims ...*dimensions.Values) {
+	a.EventWithSourceAndLabel(category, action, a.source, label, dims...)
+}
+
+// EventWithSource should only be used by clients forwarding events on behalf of another source.
+// Otherwise, use Event().
+func (a *Client) EventWithSource(category, action, source string, dims ...*dimensions.Values) {
+	a.EventWithSourceAndLabel(category, action, source, "", dims...)
+}
+
+// EventWithSourceAndLabel should only be used by clients forwarding events on behalf of another
+// source (for example, state-svc forwarding events on behalf of State Tool or an executor).
+// Otherwise, use EventWithLabel().
+func (a *Client) EventWithSourceAndLabel(category, action, source, label string, dims ...*dimensions.Values) {
 	if a.customDimensions == nil {
 		if condition.InUnitTest() {
 			return
@@ -184,13 +206,17 @@ func (a *Client) EventWithLabel(category string, action, label string, dims ...*
 	}
 
 	if a.auth != nil && a.auth.UserID() != nil {
-		a.customDimensions.UserID = p.StrP(string(*a.auth.UserID()))
+		a.customDimensions.UserID = ptr.To(string(*a.auth.UserID()))
 	}
 
-	a.customDimensions.Sequence = p.IntP(a.sequence)
-	a.sequence++
+	a.customDimensions.Sequence = ptr.To(a.sequence)
 
 	actualDims := mergeDimensions(a.customDimensions, dims...)
+
+	if a.sequence == *actualDims.Sequence {
+		// Increment the sequence number unless dims overrides it (e.g. heartbeats use -1).
+		a.sequence++
+	}
 
 	if err := actualDims.PreProcess(); err != nil {
 		multilog.Critical("Analytics dimensions cannot be processed properly: %s", errs.JoinMessage(err))
@@ -200,8 +226,8 @@ func (a *Client) EventWithLabel(category string, action, label string, dims ...*
 	// We do not wait for the events to be processed, just scheduling them
 	go func() {
 		defer a.eventWaitGroup.Done()
-		defer handlePanics(recover(), debug.Stack())
-		a.report(category, action, label, actualDims)
+		defer func() { handlePanics(recover(), debug.Stack()) }()
+		a.report(category, action, source, label, actualDims)
 	}()
 }
 

@@ -2,7 +2,6 @@ package integration
 
 import (
 	"fmt"
-	"io/ioutil"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -10,12 +9,16 @@ import (
 	"testing"
 
 	"github.com/ActiveState/cli/internal/analytics/client/blackhole"
+	"github.com/ActiveState/cli/internal/installation"
+	"github.com/ActiveState/cli/internal/primer"
 	"github.com/ActiveState/cli/internal/scriptrun"
+	"github.com/ActiveState/cli/internal/svcctl"
+	"github.com/ActiveState/cli/internal/testhelpers/e2e"
+	"github.com/ActiveState/cli/internal/testhelpers/suite"
 	"github.com/ActiveState/cli/internal/testhelpers/tagsuite"
 	"github.com/kami-zh/go-capturer"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
-	"github.com/stretchr/testify/suite"
 	"gopkg.in/yaml.v2"
 
 	"github.com/ActiveState/cli/internal/config"
@@ -29,15 +32,10 @@ import (
 	"github.com/ActiveState/cli/internal/testhelpers/osutil"
 	"github.com/ActiveState/cli/internal/testhelpers/outputhelper"
 	"github.com/ActiveState/cli/pkg/platform/authentication"
-	rtMock "github.com/ActiveState/cli/pkg/platform/runtime/mock"
+	"github.com/ActiveState/cli/pkg/platform/model"
 	"github.com/ActiveState/cli/pkg/project"
 	"github.com/ActiveState/cli/pkg/projectfile"
 )
-
-func init() {
-	mock := rtMock.Init()
-	mock.MockFullRuntime()
-}
 
 type ScriptRunSuite struct {
 	tagsuite.Suite
@@ -51,11 +49,14 @@ func (suite *ScriptRunSuite) TestRunStandaloneCommand() {
 	suite.OnlyRunForTags(tagsuite.Scripts)
 	t := suite.T()
 
+	auth, err := authentication.LegacyGet()
+	require.NoError(t, err)
+
 	pjfile := &projectfile.Project{}
 	var contents string
 	if runtime.GOOS != "windows" {
 		contents = strings.TrimSpace(`
-project: "https://platform.activestate.com/ActiveState/pjfile?commitID=00010001-0001-0001-0001-000100010001"
+project: "https://platform.activestate.com/ActiveState/pjfile"
 scripts:
   - name: run
     value: echo foo
@@ -63,16 +64,15 @@ scripts:
   `)
 	} else {
 		contents = strings.TrimSpace(`
-project: "https://platform.activestate.com/ActiveState/pjfile?commitID=00010001-0001-0001-0001-000100010001"
+project: "https://platform.activestate.com/ActiveState/pjfile"
 scripts:
   - name: run
     value: cmd.exe /C echo foo
     standalone: true
   `)
 	}
-	err := yaml.Unmarshal([]byte(contents), pjfile)
+	err = yaml.Unmarshal([]byte(contents), pjfile)
 	assert.Nil(t, err, "Unmarshalled YAML")
-	pjfile.Persist()
 
 	proj, err := project.New(pjfile, nil)
 	require.NoError(t, err)
@@ -80,14 +80,18 @@ scripts:
 	cfg, err := config.New()
 	require.NoError(t, err)
 	defer func() { require.NoError(t, cfg.Close()) }()
-	scriptRun := scriptrun.New(authentication.LegacyGet(), outputhelper.NewCatcher(), subshell.New(cfg), proj, cfg, blackhole.New(), nil)
-	err = scriptRun.Run(proj.ScriptByName("run"), []string{})
+	scriptRun := scriptrun.New(primer.New(proj, auth, outputhelper.NewCatcher(), subshell.New(cfg), cfg, blackhole.New()))
+	script, err := proj.ScriptByName("run")
+	require.NoError(t, err)
+	err = scriptRun.Run(script, []string{})
 	assert.NoError(t, err, "No error occurred")
 }
 
 func (suite *ScriptRunSuite) TestEnvIsSet() {
 	suite.OnlyRunForTags(tagsuite.Scripts)
 	t := suite.T()
+	ts := e2e.New(t, false)
+	defer ts.Close()
 
 	if runtime.GOOS == "windows" {
 		// For some reason this test hangs on Windows when ran via CI. I cannot reproduce the issue when manually invoking the
@@ -96,32 +100,45 @@ func (suite *ScriptRunSuite) TestEnvIsSet() {
 		return
 	}
 
+	auth, err := authentication.LegacyGet()
+	require.NoError(t, err)
+
 	root, err := environment.GetRootPath()
 	require.NoError(t, err, "should detect root path")
 	prjPath := filepath.Join(root, "internal", "scriptrun", "test", "integration", "testdata", "printEnv", "activestate.yaml")
 
 	pjfile, err := projectfile.Parse(prjPath)
 	require.NoError(t, err, "parsing pjfile file")
-	pjfile.Persist()
 
 	proj, err := project.New(pjfile, nil)
 	require.NoError(t, err)
 
 	os.Setenv("TEST_KEY_EXISTS", "true")
-	os.Setenv(constants.DisableRuntime, "true")
 	defer func() {
 		os.Unsetenv("TEST_KEY_EXISTS")
-		os.Unsetenv(constants.DisableRuntime)
 	}()
 
 	cfg, err := config.New()
 	require.NoError(t, err)
 	defer func() { require.NoError(t, cfg.Close()) }()
 
+	cfg.Set(constants.AsyncRuntimeConfig, true)
+
+	ipcClient := svcctl.NewDefaultIPCClient()
+	var svcPort string
+
+	svcExec, err := installation.ServiceExecFromDir(ts.Dirs.Bin)
+	suite.Require().NoError(err, errs.JoinMessage(err))
+
+	svcPort, err = svcctl.EnsureExecStartedAndLocateHTTP(ipcClient, svcExec, "from test", nil)
+	suite.Require().NoError(err, errs.JoinMessage(err))
+
 	out := capturer.CaptureOutput(func() {
-		scriptRun := scriptrun.New(authentication.LegacyGet(), outputhelper.NewCatcher(), subshell.New(cfg), proj, cfg, blackhole.New(), nil)
-		err = scriptRun.Run(proj.ScriptByName("run"), nil)
-		assert.NoError(t, err, "Error: "+errs.Join(err, ": ").Error())
+		scriptRun := scriptrun.New(primer.New(auth, outputhelper.NewCatcher(), subshell.New(cfg), proj, cfg, blackhole.New(), model.NewSvcModel(svcPort)))
+		script, err := proj.ScriptByName("run")
+		require.NoError(t, err, "Error: "+errs.JoinMessage(err))
+		err = scriptRun.Run(script, nil)
+		assert.NoError(t, err, "Error: "+errs.JoinMessage(err))
 	})
 
 	assert.Contains(t, out, constants.ActivatedStateEnvVarName)
@@ -132,28 +149,30 @@ func (suite *ScriptRunSuite) TestRunNoProjectInheritance() {
 	suite.OnlyRunForTags(tagsuite.Scripts)
 	t := suite.T()
 
+	auth, err := authentication.LegacyGet()
+	require.NoError(t, err)
+
 	pjfile := &projectfile.Project{}
 	var contents string
 	if runtime.GOOS != "windows" {
 		contents = strings.TrimSpace(`
-project: "https://platform.activestate.com/ActiveState/pjfile?commitID=00010001-0001-0001-0001-000100010001"
+project: "https://platform.activestate.com/ActiveState/pjfile"
 scripts:
   - name: run
-    value: echo $ACTIVESTATE_PROJECT
+    value: echo $ACTIVESTATE_ACTIVATED
     standalone: true
 `)
 	} else {
 		contents = strings.TrimSpace(`
-project: "https://platform.activestate.com/ActiveState/pjfile?commitID=00010001-0001-0001-0001-000100010001"
+project: "https://platform.activestate.com/ActiveState/pjfile"
 scripts:
   - name: run
-    value: echo %ACTIVESTATE_PROJECT%
+    value: echo %ACTIVESTATE_ACTIVATED%
     standalone: true
 `)
 	}
-	err := yaml.Unmarshal([]byte(contents), pjfile)
+	err = yaml.Unmarshal([]byte(contents), pjfile)
 	assert.Nil(t, err, "Unmarshalled YAML")
-	pjfile.Persist()
 
 	proj, err := project.New(pjfile, nil)
 	require.NoError(t, err)
@@ -163,9 +182,11 @@ scripts:
 	defer func() { require.NoError(t, cfg.Close()) }()
 
 	out := outputhelper.NewCatcher()
-	scriptRun := scriptrun.New(authentication.LegacyGet(), out, subshell.New(cfg), proj, cfg, blackhole.New(), nil)
-	fmt.Println(proj.ScriptByName("run"))
-	err = scriptRun.Run(proj.ScriptByName("run"), nil)
+	scriptRun := scriptrun.New(primer.New(auth, out, subshell.New(cfg), proj, cfg, blackhole.New()))
+	script, err := proj.ScriptByName("run")
+	fmt.Println(script)
+	require.NoError(t, err)
+	err = scriptRun.Run(script, nil)
 	assert.NoError(t, err, "No error occurred")
 }
 
@@ -173,16 +194,18 @@ func (suite *ScriptRunSuite) TestRunMissingScript() {
 	suite.OnlyRunForTags(tagsuite.Scripts)
 	t := suite.T()
 
+	auth, err := authentication.LegacyGet()
+	require.NoError(t, err)
+
 	pjfile := &projectfile.Project{}
 	contents := strings.TrimSpace(`
-project: "https://platform.activestate.com/ActiveState/pjfile?commitID=00010001-0001-0001-0001-000100010001"
+project: "https://platform.activestate.com/ActiveState/pjfile"
 scripts:
   - name: run
     value: whatever
   `)
-	err := yaml.Unmarshal([]byte(contents), pjfile)
+	err = yaml.Unmarshal([]byte(contents), pjfile)
 	assert.Nil(t, err, "Unmarshalled YAML")
-	pjfile.Persist()
 
 	proj, err := project.New(pjfile, nil)
 	require.NoError(t, err)
@@ -191,26 +214,28 @@ scripts:
 	require.NoError(t, err)
 	defer func() { require.NoError(t, cfg.Close()) }()
 
-	scriptRun := scriptrun.New(authentication.LegacyGet(), outputhelper.NewCatcher(), subshell.New(cfg), proj, cfg, blackhole.New(), nil)
+	scriptRun := scriptrun.New(primer.New(auth, outputhelper.NewCatcher(), subshell.New(cfg), proj, cfg, blackhole.New()))
 	err = scriptRun.Run(nil, nil)
-	assert.Error(t, err, "Error occurred")
+	assert.Error(t, err, "No error occurred")
 }
 
 func (suite *ScriptRunSuite) TestRunUnknownCommand() {
 	suite.OnlyRunForTags(tagsuite.Scripts)
 	t := suite.T()
 
+	auth, err := authentication.LegacyGet()
+	require.NoError(t, err)
+
 	pjfile := &projectfile.Project{}
 	contents := strings.TrimSpace(`
-project: "https://platform.activestate.com/ActiveState/pjfile?commitID=00010001-0001-0001-0001-000100010001"
+project: "https://platform.activestate.com/ActiveState/pjfile"
 scripts:
   - name: run
     value: whatever
     standalone: true
   `)
-	err := yaml.Unmarshal([]byte(contents), pjfile)
+	err = yaml.Unmarshal([]byte(contents), pjfile)
 	assert.Nil(t, err, "Unmarshalled YAML")
-	pjfile.Persist()
 
 	proj, err := project.New(pjfile, nil)
 	require.NoError(t, err)
@@ -219,19 +244,25 @@ scripts:
 	require.NoError(t, err)
 	defer func() { require.NoError(t, cfg.Close()) }()
 
-	scriptRun := scriptrun.New(authentication.LegacyGet(), outputhelper.NewCatcher(), subshell.New(cfg), proj, cfg, blackhole.New(), nil)
-	err = scriptRun.Run(proj.ScriptByName("run"), nil)
-	assert.Error(t, err, "Error occurred")
+	scriptRun := scriptrun.New(primer.New(auth, outputhelper.NewCatcher(), subshell.New(cfg), proj, cfg, blackhole.New()))
+	script, err := proj.ScriptByName("run")
+	require.NoError(t, err)
+	err = scriptRun.Run(script, nil)
+	assert.Error(t, err, "No error occurred")
 }
 
 func (suite *ScriptRunSuite) TestRunActivatedCommand() {
 	suite.OnlyRunForTags(tagsuite.Scripts)
 	t := suite.T()
 
+	auth, err := authentication.LegacyGet()
+	require.NoError(t, err)
+
 	// Prepare an empty activated environment.
 	root, err := environment.GetRootPath()
 	assert.NoError(t, err, "Should detect root path")
-	os.Chdir(filepath.Join(root, "test"))
+	err = os.Chdir(filepath.Join(root, "test"))
+	assert.NoError(t, err, "Should change directory")
 
 	cfg, err := config.New()
 	require.NoError(t, err)
@@ -248,14 +279,14 @@ func (suite *ScriptRunSuite) TestRunActivatedCommand() {
 	var contents string
 	if runtime.GOOS != "windows" {
 		contents = strings.TrimSpace(`
-project: "https://platform.activestate.com/ActiveState/pjfile?commitID=00010001-0001-0001-0001-000100010001"
+project: "https://platform.activestate.com/ActiveState/pjfile"
 scripts:
   - name: run
     standalone: true
     value: echo foo`)
 	} else {
 		contents = strings.TrimSpace(`
-project: "https://platform.activestate.com/ActiveState/pjfile?commitID=00010001-0001-0001-0001-000100010001"
+project: "https://platform.activestate.com/ActiveState/pjfile"
 scripts:
   - name: run
     standalone: true
@@ -263,25 +294,23 @@ scripts:
 	}
 	err = yaml.Unmarshal([]byte(contents), pjfile)
 	assert.Nil(t, err, "Unmarshalled YAML")
-	pjfile.Persist()
 
 	proj, err := project.New(pjfile, nil)
 	require.NoError(t, err)
 
 	// Run the command.
-	scriptRun := scriptrun.New(authentication.LegacyGet(), outputhelper.NewCatcher(), subshell.New(cfg), proj, cfg, blackhole.New(), nil)
-	err = scriptRun.Run(proj.ScriptByName("run"), nil)
+	scriptRun := scriptrun.New(primer.New(auth, outputhelper.NewCatcher(), subshell.New(cfg), proj, cfg, blackhole.New()))
+	script, err := proj.ScriptByName("run")
+	require.NoError(t, err)
+	err = scriptRun.Run(script, nil)
 	assert.NoError(t, err, "No error occurred")
-
-	// Reset.
-	projectfile.Reset()
 }
 
 func (suite *ScriptRunSuite) TestPathProvidesLang() {
 	suite.OnlyRunForTags(tagsuite.Scripts)
 	t := suite.T()
 
-	temp, err := ioutil.TempDir("", filepath.Base(t.Name()))
+	temp, err := os.MkdirTemp("", filepath.Base(t.Name()))
 	require.NoError(t, err)
 
 	tf := filepath.Join(temp, "python3")
@@ -318,7 +347,7 @@ func setupProjectWithScriptsExpectingArgs(t *testing.T, cmdName string) *project
 		os.Setenv("SHELL", "bash")
 	}
 
-	tmpfile, err := ioutil.TempFile("", "testRunCommand")
+	tmpfile, err := os.CreateTemp("", "testRunCommand")
 	require.NoError(t, err)
 	tmpfile.Close()
 	os.Remove(tmpfile.Name())
@@ -327,7 +356,7 @@ func setupProjectWithScriptsExpectingArgs(t *testing.T, cmdName string) *project
 	var contents string
 	if runtime.GOOS != "windows" {
 		contents = fmt.Sprintf(`
-project: "https://platform.activestate.com/ActiveState/project?commitID=00010001-0001-0001-0001-000100010001"
+project: "https://platform.activestate.com/ActiveState/project"
 scripts:
   - name: %s
     standalone: true
@@ -335,10 +364,11 @@ scripts:
       echo "ARGS|${1}|${2}|${3}|${4}|"`, cmdName)
 	} else {
 		contents = fmt.Sprintf(`
-project: "https://platform.activestate.com/ActiveState/project?commitID=00010001-0001-0001-0001-000100010001"
+project: "https://platform.activestate.com/ActiveState/project"
 scripts:
   - name: %s
     standalone: true
+    language: batch
     value: |
       echo "ARGS|%%1|%%2|%%3|%%4|"`, cmdName)
 	}
@@ -349,24 +379,24 @@ scripts:
 }
 
 func captureExecCommand(t *testing.T, tmplCmdName, cmdName string, cmdArgs []string) (string, error) {
-
-	pjfile := setupProjectWithScriptsExpectingArgs(t, tmplCmdName)
-	pjfile.Persist()
-	defer projectfile.Reset()
-
-	proj, err := project.New(pjfile, nil)
+	auth, err := authentication.LegacyGet()
 	require.NoError(t, err)
 
+	pjfile := setupProjectWithScriptsExpectingArgs(t, tmplCmdName)
+	proj, err := project.New(pjfile, nil)
+	require.NoError(t, err)
 	cfg, err := config.New()
 	require.NoError(t, err)
 	defer func() { require.NoError(t, cfg.Close()) }()
 
 	outStr, outErr := osutil.CaptureStdout(func() {
-		scriptRun := scriptrun.New(authentication.LegacyGet(), outputhelper.NewCatcher(), subshell.New(cfg), proj, cfg, blackhole.New(), nil)
-		err = scriptRun.Run(proj.ScriptByName(cmdName), cmdArgs)
+		scriptRun := scriptrun.New(primer.New(auth, outputhelper.NewCatcher(), subshell.New(cfg), proj, cfg, blackhole.New()))
+		var script *project.Script
+		if script, err = proj.ScriptByName(cmdName); err == nil {
+			err = scriptRun.Run(script, cmdArgs)
+		}
 	})
 	require.NoError(t, outErr, "error capturing stdout")
-
 	return outStr, err
 }
 

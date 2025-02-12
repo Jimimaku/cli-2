@@ -20,20 +20,24 @@ import (
 	"github.com/ActiveState/cli/internal/constants"
 	"github.com/ActiveState/cli/internal/errs"
 	"github.com/ActiveState/cli/internal/locale"
+	"github.com/ActiveState/cli/internal/logging"
 	configMediator "github.com/ActiveState/cli/internal/mediators/config"
 	"github.com/ActiveState/cli/internal/multilog"
 	"github.com/ActiveState/cli/internal/osutils"
 	"github.com/ActiveState/cli/internal/output"
 	"github.com/ActiveState/cli/internal/profile"
 	"github.com/ActiveState/cli/internal/rollbar"
+	"github.com/ActiveState/cli/internal/rtutils"
 	"github.com/ActiveState/cli/internal/sighandler"
 	"github.com/ActiveState/cli/internal/table"
 	"github.com/spf13/cobra"
 	"github.com/spf13/pflag"
 )
 
+type ErrNoChildren struct{ *locale.LocalizedError }
+
 func init() {
-	configMediator.RegisterOption(constants.UnstableConfig, configMediator.Bool, configMediator.EmptyEvent, configMediator.EmptyEvent)
+	configMediator.RegisterOption(constants.UnstableConfig, configMediator.Bool, false)
 }
 
 // appEventPrefix is used for all executables except for the State Tool itself.
@@ -47,10 +51,6 @@ var appEventPrefix string = func() string {
 
 var cobraMapping map[*cobra.Command]*Command = make(map[*cobra.Command]*Command)
 
-type cobraCommander interface {
-	GetCobraCmd() *cobra.Command
-}
-
 type primer interface {
 	Output() output.Outputer
 	Analytics() analytics.Dispatcher
@@ -58,8 +58,6 @@ type primer interface {
 }
 
 type ExecuteFunc func(cmd *Command, args []string) error
-
-type InterceptFunc func(ExecuteFunc) ExecuteFunc
 
 type CommandGroup struct {
 	name     string
@@ -91,18 +89,22 @@ type Command struct {
 
 	group CommandGroup
 
+	deprioritizeInHelpListing bool
+
 	flags     []*Flag
 	arguments []*Argument
 
-	execute        ExecuteFunc
-	interceptChain []InterceptFunc
+	execute     ExecuteFunc
+	onExecStart []ExecEventHandler
+	onExecStop  []ExecEventHandler
 
 	// deferAnalytics should be set if the command handles the GA reporting in its execute function
 	deferAnalytics bool
 
 	skipChecks bool
 
-	unstable bool
+	unstable         bool
+	structuredOutput bool
 
 	examples []string
 
@@ -145,7 +147,7 @@ func NewCommand(name, title, description string, prime primer, flags []*Flag, ar
 		Short:            short,
 		Long:             description,
 		PersistentPreRun: cmd.persistRunner,
-		RunE:             cmd.runner,
+		RunE:             cmd.cobraExecHandler,
 
 		// Restrict command line arguments by default.
 		// cmd.SetHasVariableArguments() overrides this.
@@ -176,10 +178,12 @@ func NewCommand(name, title, description string, prime primer, flags []*Flag, ar
 	cmd.cobra.SetFlagErrorFunc(func(c *cobra.Command, err error) error {
 		if cmd.shouldWarnUnstable() {
 			if !condition.OptInUnstable(cmd.cfg) {
-				cmd.out.Notice(locale.Tr("unstable_command_warning"))
+				cmd.out.Notice(locale.T("unstable_command_warning"))
 				return nil
 			}
 			cmd.outputTitleIfAny()
+		} else if cmd.out.Type().IsStructured() && !cmd.structuredOutput {
+			return locale.NewInputError("err_no_structured_output", "", string(cmd.out.Type()))
 		}
 		return err
 	})
@@ -188,82 +192,16 @@ func NewCommand(name, title, description string, prime primer, flags []*Flag, ar
 	return cmd
 }
 
-// NewHiddenShimCommand is a very specialized function that is used for adding the
-// PPM Shim.  Differences to NewCommand() are:
-// - the entrypoint is hidden in the help text
-// - calling the help for a subcommand will execute this subcommand
-func NewHiddenShimCommand(name string, prime primer, flags []*Flag, args []*Argument, execute ExecuteFunc) *Command {
-	// Validate args
-	for idx, arg := range args {
-		if idx > 0 && arg.Required && !args[idx-1].Required {
-			msg := fmt.Sprintf(
-				"Cannot have a non-required argument followed by a required argument.\n\n%v\n\n%v",
-				arg, args[len(args)-1],
-			)
-			panic(msg)
-		}
-	}
-
-	cmd := &Command{
-		execute:   execute,
-		arguments: args,
-		flags:     flags,
-		out:       prime.Output(),
-		analytics: prime.Analytics(),
-	}
-
-	cmd.cobra = &cobra.Command{
-		Use:              name,
-		PersistentPreRun: cmd.persistRunner,
-		RunE:             cmd.runner,
-		Hidden:           true,
-
-		// Silence errors and usage, we handle that ourselves
-		SilenceErrors:      true,
-		SilenceUsage:       true,
-		DisableFlagParsing: true,
-	}
-
-	cmd.cobra.SetHelpFunc(func(_ *cobra.Command, args []string) {
-		cmd.execute(cmd, args)
-	})
-
-	if err := cmd.setFlags(flags); err != nil {
-		panic(err)
-	}
-
-	return cmd
-}
-
-// NewShimCommand is a very specialized function that is used to support sub-commands for a hidden shim command.
-// It has only a name a description and function to execute.  All flags and arguments are ignored.
-func NewShimCommand(name, description string, execute ExecuteFunc) *Command {
-	cmd := &Command{
-		execute: execute,
-	}
-
-	short := description
-	if idx := strings.IndexByte(description, '.'); idx > 0 {
-		short = description[0:idx]
-	}
-
-	cmd.cobra = &cobra.Command{
-		Use:                name,
-		Short:              short,
-		Long:               description,
-		DisableFlagParsing: true,
-		RunE:               cmd.runner,
-	}
-
-	return cmd
-}
-
 func (c *Command) Use() string {
 	return c.cobra.Use
 }
 
-func (c *Command) UseFull() string {
-	return strings.Join(c.subCommandNames(), " ")
+func (c *Command) JoinedSubCommandNames() string {
+	return strings.Join(c.commandNames(false), " ")
+}
+
+func (c *Command) JoinedCommandNames() string {
+	return strings.Join(c.commandNames(true), " ")
 }
 
 func (c *Command) UsageText() string {
@@ -271,7 +209,7 @@ func (c *Command) UsageText() string {
 }
 
 func (c *Command) Help() string {
-	return fmt.Sprintf("%s\n\n%s", c.cobra.Short, c.UsageText())
+	return strings.TrimRightFunc(fmt.Sprintf("%s\n\n%s", c.cobra.Short, c.UsageText()), unicode.IsSpace)
 }
 
 func (c *Command) ShortDescription() string {
@@ -279,11 +217,13 @@ func (c *Command) ShortDescription() string {
 }
 
 func (c *Command) Execute(args []string) error {
-	defer profile.Measure(fmt.Sprintf("cobra:Execute"), time.Now())
+	defer profile.Measure("cobra:Execute", time.Now())
+	c.logArgs(args)
 	c.cobra.SetArgs(args)
 	err := c.cobra.Execute()
 	c.cobra.SetArgs(nil)
-	return setupSensibleErrors(err)
+	rationalizeError(&err)
+	return setupSensibleErrors(err, args)
 }
 
 func (c *Command) SetExamples(examples ...string) *Command {
@@ -357,6 +297,18 @@ func (c *Command) Flags() []*Flag {
 	return c.flags
 }
 
+func (c *Command) ActiveFlagNames() []string {
+	names := []string{}
+	for _, flag := range c.ActiveFlags() {
+		if flag.Name != "" {
+			names = append(names, flag.Name)
+		} else if flag.Shorthand != "" {
+			names = append(names, flag.Shorthand)
+		}
+	}
+	return names
+}
+
 func (c *Command) ActiveFlags() []*Flag {
 	var flags []*Flag
 	flagMapping := map[string]*Flag{}
@@ -384,27 +336,18 @@ func (c *Command) Arguments() []*Argument {
 	return c.arguments
 }
 
-func (c *Command) SetInterceptChain(fns ...InterceptFunc) {
-	c.interceptChain = fns
+type ExecEventHandler func(cmd *Command, args []string) error
+
+func (c *Command) OnExecStart(handler ExecEventHandler) {
+	c.TopParent().onExecStart = append(c.TopParent().onExecStart, handler)
+}
+
+func (c *Command) OnExecStop(handler ExecEventHandler) {
+	c.TopParent().onExecStop = append(c.TopParent().onExecStop, handler)
 }
 
 func DisableMousetrap() {
 	cobra.MousetrapHelpText = ""
-}
-
-func (c *Command) interceptFunc() InterceptFunc {
-	return func(fn ExecuteFunc) ExecuteFunc {
-		defer profile.Measure("captain:intercepter", time.Now())
-		for i := len(c.interceptChain) - 1; i >= 0; i-- {
-			if c.interceptChain[i] == nil {
-				continue
-			}
-			start := time.Now()
-			fn = c.interceptChain[i](fn)
-			profile.Measure(fmt.Sprintf("captain:intercepter:%d", i), start)
-		}
-		return fn
-	}
 }
 
 // SetUnstable denotes if the command as a beta feature. This will remove the command
@@ -429,6 +372,10 @@ func (c *Command) Group() CommandGroup {
 	return c.group
 }
 
+func (c *Command) DeprioritizeInHelpListing() {
+	c.deprioritizeInHelpListing = true
+}
+
 // SetHasVariableArguments allows a captain Command to accept a variable number of command line
 // arguments.
 // By default, captain has Cobra restrict the command line arguments accepted to those given in the
@@ -438,19 +385,32 @@ func (c *Command) SetHasVariableArguments() *Command {
 	return c
 }
 
+func (c *Command) SetSupportsStructuredOutput() *Command {
+	c.structuredOutput = true
+	return c
+}
+
 func (c *Command) SkipChecks() bool {
 	return c.skipChecks
 }
 
 func (c *Command) SortBefore(c2 *Command) bool {
-	if c.group != c2.group {
+	switch {
+	case c.group != c2.group:
 		return c.group.SortBefore(c2.group)
+	case c.deprioritizeInHelpListing == c2.deprioritizeInHelpListing:
+		return c.Name() < c2.Name()
+	default:
+		return !c.deprioritizeInHelpListing
 	}
-	return c.Name() < c2.Name()
 }
 
 func (c *Command) AddChildren(children ...*Command) {
 	for _, child := range children {
+		if c.unstable {
+			child.SetUnstable(true)
+		}
+
 		c.commands = append(c.commands, child)
 		c.cobra.AddCommand(child.cobra)
 
@@ -458,9 +418,6 @@ func (c *Command) AddChildren(children ...*Command) {
 			panic(fmt.Sprintf("Command %s already has a parent: %s", child.Name(), child.parent.Name()))
 		}
 		child.parent = c
-
-		interceptChain := append(c.interceptChain, child.interceptChain...)
-		child.SetInterceptChain(interceptChain...)
 	}
 }
 
@@ -511,15 +468,19 @@ func (c *Command) AvailableChildren() []*Command {
 	return commands
 }
 
-func (c *Command) Find(args []string) (*Command, error) {
+func (c *Command) FindChild(args []string) (*Command, error) {
 	foundCobra, _, err := c.cobra.Find(args)
 	if err != nil {
 		return nil, errs.Wrap(err, "Could not find child command with args: %s", strings.Join(args, " "))
 	}
 	if cmd, ok := cobraMapping[foundCobra]; ok {
+		if cmd.parent == nil {
+			// Cobra returns the parent command if no child was found, but we don't want that.
+			return nil, nil
+		}
 		return cmd, nil
 	}
-	return nil, locale.NewError("err_captain_cmd_find", "Could not find child Command with args: {{.V0}}", strings.Join(args, " "))
+	return nil, &ErrNoChildren{locale.NewError("err_captain_cmd_find", "Could not find child Command with args: {{.V0}}", strings.Join(args, " "))}
 }
 
 func (c *Command) GenBashCompletions() (string, error) {
@@ -560,6 +521,9 @@ func (c *Command) flagByName(name string, persistOnly bool) *Flag {
 			return flag
 		}
 	}
+	if c.parent != nil {
+		return c.parent.flagByName(name, persistOnly)
+	}
 	return nil
 }
 
@@ -568,13 +532,13 @@ func (c *Command) persistRunner(cobraCmd *cobra.Command, args []string) {
 	c.runFlags(true)
 }
 
-// subCommandNames returns a slice of the names of the sub-commands called
-func (c *Command) subCommandNames() []string {
+// commandNames returns a slice of the names of the sub-commands called
+func (c *Command) commandNames(includeRoot bool) []string {
 	var commands []string
 	cmd := c.cobra
 	root := cmd.Root()
 	for {
-		if cmd == nil || cmd == root {
+		if cmd == nil || (cmd == root && !includeRoot) {
 			break
 		}
 		commands = append(commands, cmd.Name())
@@ -589,16 +553,18 @@ func (c *Command) subCommandNames() []string {
 	return commands
 }
 
-func (c *Command) runner(cobraCmd *cobra.Command, args []string) error {
+// cobraExecHandler is the function that we've routed cobra to run when a command gets executed.
+// It allows us to wrap some over-arching logic around command executions, and should never be called directly.
+func (c *Command) cobraExecHandler(cobraCmd *cobra.Command, args []string) (rerr error) {
 	defer profile.Measure("captain:runner", time.Now())
 
-	subCommandString := c.UseFull()
+	subCommandString := c.JoinedSubCommandNames()
 	rollbar.CurrentCmd = appEventPrefix + subCommandString
 
 	// Send GA events unless they are handled in the runners...
 	if c.analytics != nil {
 		var label []string
-		if len(args) > 0 && (args[0] == constants.PpmShim || args[0] == constants.PipShim) {
+		if len(args) > 0 && (args[0] == constants.PipShim) {
 			label = append(label, args[0])
 		}
 
@@ -626,6 +592,8 @@ func (c *Command) runner(cobraCmd *cobra.Command, args []string) error {
 	if c.shouldWarnUnstable() && !condition.OptInUnstable(c.cfg) {
 		c.out.Notice(locale.Tr("unstable_command_warning"))
 		return nil
+	} else if c.out.Type().IsStructured() && !c.structuredOutput {
+		return locale.NewInputError("err_no_structured_output", "", string(c.out.Type()))
 	}
 
 	// Run OnUse functions for non-persistent flags
@@ -655,20 +623,37 @@ func (c *Command) runner(cobraCmd *cobra.Command, args []string) error {
 
 	c.outputTitleIfAny()
 
-	intercept := c.interceptFunc()
-	execute := intercept(c.execute)
-
 	// initialize signal handler for analytics events
 	as := sighandler.NewAwaitingSigHandler(os.Interrupt)
 	sighandler.Push(as)
-	defer sighandler.Pop()
+	defer rtutils.Closer(sighandler.Pop, &rerr)
 
 	err := as.WaitForFunc(func() error {
 		defer profile.Measure("captain:cmd:execute", time.Now())
-		return execute(c, args)
+
+		for _, handler := range c.TopParent().onExecStart {
+			if err := handler(c, args); err != nil {
+				return errs.Wrap(err, "onExecStart handler failed")
+			}
+		}
+
+		if err := c.execute(c, args); err != nil {
+			if !locale.HasError(err) {
+				return locale.WrapError(err, "unexpected_error", "Command failed due to unexpected error. For your convenience, this is the error chain:\n{{.V0}}", errs.JoinMessage(err))
+			}
+			return errs.Wrap(err, "execute failed")
+		}
+
+		for _, handler := range c.TopParent().onExecStop {
+			if err := handler(c, args); err != nil {
+				return errs.Wrap(err, "onExecStop handler failed")
+			}
+		}
+
+		return nil
 	})
 
-	exitCode := errs.UnwrapExitCode(err)
+	exitCode := errs.ParseExitCode(err)
 
 	var serr interface{ Signal() os.Signal }
 	if errors.As(err, &serr) {
@@ -710,7 +695,7 @@ func (c *Command) runFlags(persistOnly bool) {
 }
 
 func (c *Command) shouldWarnUnstable() bool {
-	return c.unstable && (c.out.Type() != output.EditorV0FormatName && c.out.Type() != output.EditorFormatName)
+	return c.unstable && !c.out.Type().IsStructured()
 }
 
 func (c *Command) outputTitleIfAny() {
@@ -727,16 +712,9 @@ func (c *Command) outputTitleIfAny() {
 	}
 }
 
-func (c *Command) argValidator(cobraCmd *cobra.Command, args []string) error {
-	return nil
-}
-
 // setupSensibleErrors inspects an error value for certain errors and returns a
 // wrapped error that can be checked and that is localized.
-func setupSensibleErrors(err error) error {
-	if err, ok := err.(error); ok && err == nil {
-		return nil
-	}
+func setupSensibleErrors(err error, args []string) error {
 	if err == nil {
 		return nil
 	}
@@ -781,10 +759,7 @@ func setupSensibleErrors(err error) error {
 	}
 
 	if pflagErrCmd := pflagCmdErrMsgCmd(errMsg); pflagErrCmd != "" {
-		return locale.NewInputError(
-			"command_cmd_no_such_cmd",
-			"No such command: [NOTICE]{{.V0}}[/RESET]", pflagErrCmd,
-		)
+		return locale.NewInputError("command_cmd_no_such_cmd", "", pflagErrCmd)
 	}
 
 	// Cobra error message of the form "accepts at most 0 arg(s), received 1, called at: "
@@ -794,6 +769,9 @@ func setupSensibleErrors(err error) error {
 		if err != nil || n != 2 {
 			multilog.Error("Unable to parse cobra error message: %v", err)
 			return locale.NewInputError("err_cmd_unexpected_arguments", "Unexpected argument(s) given")
+		}
+		if max == 0 && received > 0 {
+			return locale.NewInputError("command_cmd_no_such_cmd", "", args[len(args)-received])
 		}
 		return locale.NewInputError(
 			"err_cmd_too_many_arguments",
@@ -809,7 +787,7 @@ func pflagFlagErrMsgFlag(errMsg string) string {
 	flagText := strings.TrimPrefix(errMsg, "no such flag ")
 	flagText = strings.TrimPrefix(flagText, "unknown flag: ")
 	flagText = strings.TrimPrefix(flagText, "bad flag syntax: ")
-	//unknown shorthand flag: 'x' in -x
+	// unknown shorthand flag: 'x' in -x
 	flagText = strings.TrimPrefix(flagText, "unknown shorthand flag: ")
 
 	if flagText == errMsg {
@@ -871,7 +849,14 @@ func (cmd *Command) Usage() error {
 		return errs.Wrap(err, "Could not execute template")
 	}
 
-	cmd.out.Print(out.String())
+	if writer := cmd.cobra.OutOrStdout(); writer != os.Stdout {
+		_, err := writer.Write(out.Bytes())
+		if err != nil {
+			return errs.Wrap(err, "Unable to write to cobra outWriter")
+		}
+	} else {
+		cmd.out.Print(strings.TrimRightFunc(out.String(), unicode.IsSpace))
+	}
 
 	return nil
 
@@ -900,5 +885,29 @@ func childCommands(cmd *Command) string {
 		}
 	}
 
-	return fmt.Sprintf("Available Commands:\n%s", table.Render())
+	return fmt.Sprintf("\n\nAvailable Commands:\n%s", table.Render())
+}
+
+func (c *Command) logArgs(args []string) {
+	child, err := c.FindChild(args)
+	if err != nil {
+		logging.Debug("Could not find child command, error: %v", err)
+	}
+
+	var logArgs []string
+	if child != nil {
+		logArgs = append(logArgs, child.commandNames(false)...)
+	}
+
+	logging.Debug("Args: %s, Flags: %s", logArgs, flags(args))
+}
+
+func flags(args []string) []string {
+	flags := []string{}
+	for _, arg := range args {
+		if strings.HasPrefix(arg, "-") || condition.InActiveStateCI() || condition.BuiltOnDevMachine() {
+			flags = append(flags, arg)
+		}
+	}
+	return flags
 }

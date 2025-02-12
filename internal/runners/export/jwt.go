@@ -27,8 +27,12 @@ func (j *JWT) Run(params *JWTParams) error {
 		return locale.NewInputError("err_jwt_not_authenticated")
 	}
 
-	token := authentication.LegacyGet().BearerToken()
-	j.Outputer.Print(
-		output.NewFormatter(token).WithFormat(output.EditorV0FormatName, []byte(token)))
+	token := j.Auth.BearerToken()
+	j.Outputer.Print(output.Prepare(
+		token,
+		&struct {
+			Value string `json:"value"`
+		}{token},
+	))
 	return nil
 }

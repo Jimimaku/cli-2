@@ -2,24 +2,24 @@ package validator
 
 import (
 	"github.com/vektah/gqlparser/v2/ast"
+
+	//nolint:revive // Validator rules each use dot imports for convenience.
 	. "github.com/vektah/gqlparser/v2/validator"
 )
 
 func init() {
 	AddRule("KnownTypeNames", func(observers *Events, addError AddErrFunc) {
-		observers.OnOperation(func(walker *Walker, operation *ast.OperationDefinition) {
-			for _, vdef := range operation.VariableDefinitions {
-				typeName := vdef.Type.Name()
-				def := walker.Schema.Types[typeName]
-				if def != nil {
-					continue
-				}
-
-				addError(
-					Message(`Unknown type "%s".`, typeName),
-					At(operation.Position),
-				)
+		observers.OnVariable(func(walker *Walker, variable *ast.VariableDefinition) {
+			typeName := variable.Type.Name()
+			typdef := walker.Schema.Types[typeName]
+			if typdef != nil {
+				return
 			}
+
+			addError(
+				Message(`Unknown type "%s".`, typeName),
+				At(variable.Position),
+			)
 		})
 
 		observers.OnInlineFragment(func(walker *Walker, inlineFragment *ast.InlineFragment) {

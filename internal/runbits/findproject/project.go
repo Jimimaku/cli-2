@@ -1,6 +1,7 @@
 package findproject
 
 import (
+	"errors"
 	"sort"
 	"strings"
 
@@ -18,7 +19,8 @@ type LocalProjectDoesNotExist struct{ *locale.LocalizedError }
 
 // IsLocalProjectDoesNotExistError checks if the error is a LocalProjectDoesNotExist.
 func IsLocalProjectDoesNotExistError(err error) bool {
-	return errs.Matches(err, &LocalProjectDoesNotExist{})
+	var errLocalProjectDoesNotExist *LocalProjectDoesNotExist
+	return errors.As(err, &errLocalProjectDoesNotExist)
 }
 
 func FromInputByPriority(path string, ns *project.Namespaced, cfg projectfile.ConfigGetter, prompt prompt.Prompter) (*project.Project, error) {
@@ -97,7 +99,8 @@ func FromNamespaceLocal(ns *project.Namespaced, cfg projectfile.ConfigGetter, pr
 				"",
 				locale.Tl("project_select_namespace", "Multiple projects with that name were found. Please select one."),
 				matchingNamespaces,
-				&namespace)
+				&namespace,
+				nil)
 			if err != nil {
 				return nil, locale.WrapError(err, "err_project_select_namespace", "Error selecting project")
 			}
@@ -115,7 +118,8 @@ func FromNamespaceLocal(ns *project.Namespaced, cfg projectfile.ConfigGetter, pr
 				"",
 				locale.Tl("project_select_path", "Multiple project paths for the selected project were found. Please select one."),
 				paths,
-				&path)
+				&path,
+				nil)
 			if err != nil {
 				return nil, locale.WrapError(err, "err_project_select_path", "Error selecting project path")
 			}

@@ -20,7 +20,7 @@ func newPlatformsCommand(prime *primer.Values) *captain.Command {
 		func(_ *captain.Command, _ []string) error {
 			return runner.Run()
 		},
-	).SetGroup(PlatformGroup).SetUnstable(true)
+	).SetGroup(PlatformGroup).SetSupportsStructuredOutput().SetUnstable(true)
 }
 
 func newPlatformsSearchCommand(prime *primer.Values) *captain.Command {
@@ -36,7 +36,7 @@ func newPlatformsSearchCommand(prime *primer.Values) *captain.Command {
 		func(_ *captain.Command, _ []string) error {
 			return runner.Run()
 		},
-	)
+	).SetSupportsStructuredOutput()
 }
 
 func newPlatformsAddCommand(prime *primer.Values) *captain.Command {
@@ -51,7 +51,7 @@ func newPlatformsAddCommand(prime *primer.Values) *captain.Command {
 		prime,
 		[]*captain.Flag{
 			{
-				Name:        locale.T("flag_platforms_shared_bitwidth"),
+				Name:        "bit-width",
 				Description: locale.T("flag_platforms_shared_bitwidth_description"),
 				Value:       &params.BitWidth,
 			},
@@ -67,7 +67,7 @@ func newPlatformsAddCommand(prime *primer.Values) *captain.Command {
 		func(_ *captain.Command, _ []string) error {
 			return runner.Run(params)
 		},
-	)
+	).SetSupportsStructuredOutput()
 }
 
 func newPlatformsRemoveCommand(prime *primer.Values) *captain.Command {
@@ -82,7 +82,7 @@ func newPlatformsRemoveCommand(prime *primer.Values) *captain.Command {
 		prime,
 		[]*captain.Flag{
 			{
-				Name:        locale.T("flag_platforms_shared_bitwidth"),
+				Name:        "bit-width",
 				Description: locale.T("flag_platforms_shared_bitwidth_description"),
 				Value:       &params.BitWidth,
 			},
@@ -98,5 +98,5 @@ func newPlatformsRemoveCommand(prime *primer.Values) *captain.Command {
 		func(_ *captain.Command, _ []string) error {
 			return runner.Run(params)
 		},
-	)
+	).SetSupportsStructuredOutput()
 }

@@ -5,6 +5,7 @@ import (
 	"github.com/ActiveState/cli/internal/locale"
 	"github.com/ActiveState/cli/internal/output"
 	"github.com/ActiveState/cli/internal/primer"
+	"github.com/ActiveState/cli/pkg/platform/authentication"
 	"github.com/ActiveState/cli/pkg/project"
 )
 
@@ -12,6 +13,7 @@ type getPrimeable interface {
 	primer.Outputer
 	primer.Projecter
 	primer.Configurer
+	primer.Auther
 }
 
 // GetRunParams tracks the info required for running Get.
@@ -24,6 +26,7 @@ type Get struct {
 	proj *project.Project
 	out  output.Outputer
 	cfg  keypairs.Configurable
+	auth *authentication.Auth
 }
 
 // SecretExport defines important information about a secret that should be
@@ -42,25 +45,26 @@ func NewGet(p getPrimeable) *Get {
 		out:  p.Output(),
 		proj: p.Project(),
 		cfg:  p.Config(),
+		auth: p.Auth(),
 	}
 }
 
 // Run executes the get behavior.
 func (g *Get) Run(params GetRunParams) error {
-	if err := checkSecretsAccess(g.proj); err != nil {
+	g.out.Notice(locale.Tr("operating_message", g.proj.NamespaceString(), g.proj.Dir()))
+	if err := checkSecretsAccess(g.proj, g.auth); err != nil {
 		return locale.WrapError(err, "secrets_err_check_access")
 	}
 
-	secret, valuePtr, err := getSecretWithValue(g.proj, params.Name, g.cfg)
+	secret, valuePtr, err := getSecretWithValue(g.proj, params.Name, g.cfg, g.auth)
 	if err != nil {
 		return locale.WrapError(err, "secrets_err_values")
 	}
 
-	data := newGetOutput(params.Name, secret, valuePtr)
+	data := &getOutput{params.Name, secret, valuePtr}
 	if err := data.Validate(g.out.Type()); err != nil {
 		return locale.WrapError(err, "secrets_err_getout_invalid", "'get secret' output data invalid")
 	}
-
 	g.out.Print(data)
 
 	return nil
@@ -72,46 +76,35 @@ type getOutput struct {
 	valuePtr  *string
 }
 
-func newGetOutput(reqSecret string, secret *project.Secret, valuePtr *string) *getOutput {
-	return &getOutput{
-		reqSecret: reqSecret,
-		secret:    secret,
-		valuePtr:  valuePtr,
-	}
-}
-
 // Validate returns a directly usable localized error.
-func (d *getOutput) Validate(format output.Format) error {
-	switch format {
-	case output.JSONFormatName, output.EditorV0FormatName, output.EditorFormatName:
-		return nil
-	default:
-		if d.valuePtr == nil {
-			return newValuePtrIsNilError(d.reqSecret, d.secret.IsUser())
-		}
-		return nil
+func (o *getOutput) Validate(format output.Format) error {
+	if !format.IsStructured() && o.valuePtr == nil {
+		return newValuePtrIsNilError(o.reqSecret, o.secret.IsUser())
 	}
+	return nil
 }
 
-func (d *getOutput) MarshalOutput(format output.Format) interface{} {
+func (o *getOutput) MarshalOutput(format output.Format) interface{} {
 	value := ""
-	if d.valuePtr != nil {
-		value = *d.valuePtr
+	if o.valuePtr != nil {
+		value = *o.valuePtr
+	}
+	return value
+}
+
+func (o *getOutput) MarshalStructured(format output.Format) interface{} {
+	value := ""
+	if o.valuePtr != nil {
+		value = *o.valuePtr
+	}
+	return &SecretExport{
+		o.secret.Name(),
+		o.secret.Scope(),
+		o.secret.Description(),
+		o.valuePtr != nil,
+		value,
 	}
 
-	switch format {
-	case output.JSONFormatName, output.EditorV0FormatName, output.EditorFormatName:
-		return &SecretExport{
-			d.secret.Name(),
-			d.secret.Scope(),
-			d.secret.Description(),
-			d.valuePtr != nil,
-			value,
-		}
-
-	default:
-		return value
-	}
 }
 
 func newValuePtrIsNilError(reqSecret string, isUser bool) error {

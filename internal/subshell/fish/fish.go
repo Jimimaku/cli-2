@@ -91,7 +91,7 @@ func (v *SubShell) WriteCompletionScript(completionScript string) error {
 	fpath := filepath.Join(homeDir, ".config/fish/completions", constants.CommandName+".fish")
 	err = fileutils.WriteFile(fpath, []byte(completionScript))
 	if err != nil {
-		return errs.Wrap(err, "Could not write completions script")
+		logging.Debug("Could not write completions script '%s', likely due to non-admin privileges", fpath)
 	}
 
 	return nil
@@ -116,9 +116,9 @@ func (v *SubShell) EnsureRcFileExists() error {
 }
 
 // SetupShellRcFile - subshell.SubShell
-func (v *SubShell) SetupShellRcFile(targetDir string, env map[string]string, namespace *project.Namespaced) error {
+func (v *SubShell) SetupShellRcFile(targetDir string, env map[string]string, namespace *project.Namespaced, cfg sscommon.Configurable) error {
 	env = sscommon.EscapeEnv(env)
-	return sscommon.SetupShellRcFile(filepath.Join(targetDir, "shell.fish"), "fishrc_global.fish", env, namespace)
+	return sscommon.SetupShellRcFile(filepath.Join(targetDir, "shell.fish"), "fishrc_global.fish", env, namespace, cfg)
 }
 
 // SetEnv - see subshell.SetEnv

@@ -2,12 +2,12 @@ package integration
 
 import (
 	"fmt"
-	"strings"
 	"testing"
 
+	"github.com/ActiveState/cli/internal/constants"
 	"github.com/ActiveState/cli/internal/testhelpers/e2e"
+	"github.com/ActiveState/cli/internal/testhelpers/suite"
 	"github.com/ActiveState/cli/internal/testhelpers/tagsuite"
-	"github.com/stretchr/testify/suite"
 )
 
 type PlatformsIntegrationTestSuite struct {
@@ -19,15 +19,12 @@ func (suite *PlatformsIntegrationTestSuite) TestPlatforms_searchSimple() {
 	ts := e2e.New(suite.T(), false)
 	defer ts.Close()
 
-	suite.PrepareActiveStateYAML(ts)
+	ts.PrepareEmptyProject()
 
 	cp := ts.Spawn("platforms", "search")
 	expectations := []string{
 		"Darwin",
-		"Darwin",
 		"Linux",
-		"Linux",
-		"Windows",
 		"Windows",
 	}
 	for _, expectation := range expectations {
@@ -41,17 +38,18 @@ func (suite *PlatformsIntegrationTestSuite) TestPlatforms_listSimple() {
 	ts := e2e.New(suite.T(), false)
 	defer ts.Close()
 
-	suite.PrepareActiveStateYAML(ts)
+	ts.PrepareEmptyProject()
 
 	cmds := [][]string{
-		[]string{"platforms"},
-		[]string{"platforms", "search"},
+		{"platforms"},
+		{"platforms", "search"},
 	}
 	for _, cmd := range cmds {
 		cp := ts.Spawn(cmd...)
 		expectations := []string{
 			"Linux",
-			"4.15.0",
+			"4.18.0",
+			"x86",
 			"64",
 		}
 		for _, expectation := range expectations {
@@ -66,17 +64,21 @@ func (suite *PlatformsIntegrationTestSuite) TestPlatforms_addRemove() {
 	ts := e2e.New(suite.T(), false)
 	defer ts.Close()
 
-	username := ts.CreateNewUser()
-	namespace := fmt.Sprintf("%s/%s", username, "platform-test")
-
-	cp := ts.Spawn("fork", "ActiveState-CLI/Platforms", "--org", username, "--name", "platform-test")
-	cp.ExpectExitCode(0)
-
-	cp = ts.Spawn("activate", namespace, "--path="+ts.Dirs.Work, "--output=json")
-	cp.ExpectExitCode(0)
+	ts.PrepareEmptyProject()
 
 	platform := "Windows"
 	version := "10.0.17134.1"
+
+	cp := ts.Spawn("config", "set", constants.AsyncRuntimeConfig, "true")
+	cp.ExpectExitCode(0)
+
+	cp = ts.Spawn("platforms", "remove", fmt.Sprintf("%s@%s", platform, version))
+	cp.ExpectExitCode(0)
+
+	cp = ts.Spawn("platforms")
+	cp.ExpectExitCode(0)
+	output := cp.Output()
+	suite.Require().NotContains(output, "Windows", "Windows platform should not be present after removal")
 
 	cp = ts.Spawn("platforms", "add", fmt.Sprintf("%s@%s", platform, version))
 	cp.ExpectExitCode(0)
@@ -85,20 +87,11 @@ func (suite *PlatformsIntegrationTestSuite) TestPlatforms_addRemove() {
 	expectations := []string{
 		platform,
 		version,
+		"x86",
 		"64",
 	}
 	for _, expectation := range expectations {
 		cp.Expect(expectation)
-	}
-
-	cp = ts.Spawn("platforms", "remove", fmt.Sprintf("%s@%s", platform, version))
-	cp.ExpectExitCode(0)
-
-	cp = ts.Spawn("platforms")
-	cp.ExpectExitCode(0)
-	output := cp.TrimmedSnapshot()
-	if strings.Contains(output, "Windows") {
-		suite.T().Fatal("Windows platform should not be present after removal")
 	}
 }
 
@@ -107,45 +100,72 @@ func (suite *PlatformsIntegrationTestSuite) TestPlatforms_addRemoveLatest() {
 	ts := e2e.New(suite.T(), false)
 	defer ts.Close()
 
-	username := ts.CreateNewUser()
-	namespace := fmt.Sprintf("%s/%s", username, "platform-test")
-
-	cp := ts.Spawn("fork", "ActiveState-CLI/Platforms", "--org", username, "--name", "platform-test")
-	cp.ExpectExitCode(0)
-
-	cp = ts.Spawn("activate", namespace, "--path="+ts.Dirs.Work, "--output=json")
-	cp.ExpectExitCode(0)
+	ts.PrepareEmptyProject()
 
 	platform := "Windows"
 	version := "10.0.17134.1"
 
-	cp = ts.Spawn("platforms", "add", "windows")
+	cp := ts.Spawn("config", "set", constants.AsyncRuntimeConfig, "true")
 	cp.ExpectExitCode(0)
-
-	cp = ts.Spawn("platforms")
-	expectations := []string{
-		platform,
-		version,
-		"64",
-	}
-	for _, expectation := range expectations {
-		cp.Expect(expectation)
-	}
 
 	cp = ts.Spawn("platforms", "remove", fmt.Sprintf("%s@%s", platform, version))
 	cp.ExpectExitCode(0)
 
 	cp = ts.Spawn("platforms")
 	cp.ExpectExitCode(0)
-	output := cp.TrimmedSnapshot()
-	if strings.Contains(output, "Windows") {
-		suite.T().Fatal("Windows platform should not be present after removal")
-	}
+	output := cp.Output()
+	suite.Require().NotContains(output, "Windows", "Windows platform should not be present after removal")
+
+	cp = ts.Spawn("platforms", "add", "windows")
+	cp.ExpectExitCode(0)
+
+	cp = ts.Spawn("platforms")
+	cp.Expect(platform)
+	cp.Expect(version)
+	cp.Expect("x86")
+	cp.Expect("64")
+	cp.ExpectExitCode(0)
 }
 
-func (suite *PlatformsIntegrationTestSuite) PrepareActiveStateYAML(ts *e2e.Session) {
-	asyData := `project: "https://platform.activestate.com/cli-integration-tests/ExercisePlatforms"`
-	ts.PrepareActiveStateYAML(asyData)
+func (suite *PlatformsIntegrationTestSuite) TestPlatforms_addNotFound() {
+	suite.OnlyRunForTags(tagsuite.Platforms)
+	ts := e2e.New(suite.T(), false)
+	defer ts.Close()
+
+	ts.PrepareEmptyProject()
+
+	// OS name doesn't match
+	cp := ts.Spawn("platforms", "add", "bunnies")
+	cp.Expect("Could not find")
+	cp.ExpectExitCode(1)
+
+	// OS version doesn't match
+	cp = ts.Spawn("platforms", "add", "windows@99.99.99")
+	cp.Expect("Could not find")
+	cp.ExpectExitCode(1)
+
+	// bitwidth version doesn't match
+	cp = ts.Spawn("platforms", "add", "windows", "--bit-width=999")
+	cp.Expect("Could not find")
+	cp.ExpectExitCode(1)
+}
+
+func (suite *PlatformsIntegrationTestSuite) TestJSON() {
+	suite.OnlyRunForTags(tagsuite.Platforms, tagsuite.JSON)
+	ts := e2e.New(suite.T(), false)
+	defer ts.Close()
+
+	ts.PrepareEmptyProject()
+
+	cp := ts.Spawn("platforms", "-o", "json")
+	cp.Expect(`[{"name":`)
+	cp.ExpectExitCode(0)
+	AssertValidJSON(suite.T(), cp)
+
+	cp = ts.Spawn("platforms", "search", "-o", "json")
+	cp.Expect(`[{"name":`)
+	cp.ExpectExitCode(0)
+	AssertValidJSON(suite.T(), cp)
 }
 
 func TestPlatformsIntegrationTestSuite(t *testing.T) {

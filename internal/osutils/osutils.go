@@ -71,13 +71,21 @@ func winPathToLinPath(name string) (string, error) {
 	return path, nil
 }
 
-// Getwd is an alias of osutils.Getwd which wraps the error in our localized error message and FailGetWd, which is user facing (doesn't get logged)
+// Getwd is an alias of os.Getwd which wraps the error in our localized error message and FailGetWd, which is user facing (doesn't get logged)
 func Getwd() (string, error) {
 	r, err := os.Getwd()
 	if err != nil {
 		return "", errs.Wrap(err, "GetWd failed")
 	}
 	return r, nil
+}
+
+func GetwdUnsafe() string {
+	r, err := Getwd()
+	if err != nil {
+		panic(err)
+	}
+	return r
 }
 
 func EnvSliceToMap(envSlice []string) map[string]string {

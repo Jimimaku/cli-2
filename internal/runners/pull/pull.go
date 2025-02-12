@@ -5,25 +5,36 @@ import (
 	"strings"
 
 	"github.com/ActiveState/cli/internal/analytics"
-	"github.com/ActiveState/cli/internal/installation/storage"
-	"github.com/ActiveState/cli/pkg/cmdlets/commit"
-	"github.com/ActiveState/cli/pkg/platform/api/mono/mono_models"
-	"github.com/ActiveState/cli/pkg/platform/runtime/target"
-	"github.com/go-openapi/strfmt"
-
+	anaConst "github.com/ActiveState/cli/internal/analytics/constants"
+	"github.com/ActiveState/cli/internal/analytics/dimensions"
 	"github.com/ActiveState/cli/internal/config"
+	"github.com/ActiveState/cli/internal/constants"
 	"github.com/ActiveState/cli/internal/errs"
 	"github.com/ActiveState/cli/internal/locale"
+	"github.com/ActiveState/cli/internal/logging"
 	"github.com/ActiveState/cli/internal/output"
 	"github.com/ActiveState/cli/internal/primer"
 	"github.com/ActiveState/cli/internal/prompt"
-	"github.com/ActiveState/cli/internal/runbits"
+	"github.com/ActiveState/cli/internal/rtutils/ptr"
+	"github.com/ActiveState/cli/internal/runbits/buildscript"
+	"github.com/ActiveState/cli/internal/runbits/commit"
+	"github.com/ActiveState/cli/internal/runbits/rationalize"
+	"github.com/ActiveState/cli/internal/runbits/runtime"
+	"github.com/ActiveState/cli/internal/runbits/runtime/trigger"
+	"github.com/ActiveState/cli/pkg/localcommit"
+	"github.com/ActiveState/cli/pkg/platform/api/buildplanner/types"
 	"github.com/ActiveState/cli/pkg/platform/authentication"
 	"github.com/ActiveState/cli/pkg/platform/model"
+	"github.com/ActiveState/cli/pkg/platform/model/buildplanner"
 	"github.com/ActiveState/cli/pkg/project"
+	"github.com/go-openapi/strfmt"
 )
 
 type Pull struct {
+	prime primeable
+	// The remainder is redundant with the above. Refactoring this will follow in a later story so as not to blow
+	// up the one that necessitates adding the primer at this level.
+	// https://activestatef.atlassian.net/browse/DX-2869
 	prompt    prompt.Prompter
 	project   *project.Project
 	auth      *authentication.Auth
@@ -33,9 +44,17 @@ type Pull struct {
 	svcModel  *model.SvcModel
 }
 
+type errNoCommonParent struct {
+	localCommitID  strfmt.UUID
+	remoteCommitID strfmt.UUID
+}
+
+func (e errNoCommonParent) Error() string {
+	return "no common parent"
+}
+
 type PullParams struct {
-	Force      bool
-	SetProject string
+	Force bool
 }
 
 type primeable interface {
@@ -50,6 +69,7 @@ type primeable interface {
 
 func New(prime primeable) *Pull {
 	return &Pull{
+		prime,
 		prime.Prompt(),
 		prime.Project(),
 		prime.Auth(),
@@ -60,108 +80,145 @@ func New(prime primeable) *Pull {
 	}
 }
 
-type outputFormat struct {
-	Message string `locale:"message,Message"`
-	Success bool   `locale:"success,Success"`
+type pullOutput struct {
+	Message string `locale:"message,Message" json:"message"`
+	Success bool   `locale:"success,Success" json:"success"`
 }
 
-func (f *outputFormat) MarshalOutput(format output.Format) interface{} {
-	switch format {
-	case output.EditorV0FormatName:
-		return f.editorV0Format()
-	case output.PlainFormatName:
-		return f.Message
-	}
-
-	return f
+func (o *pullOutput) MarshalOutput(format output.Format) interface{} {
+	return o.Message
 }
 
-func (p *Pull) Run(params *PullParams) error {
+func (o *pullOutput) MarshalStructured(format output.Format) interface{} {
+	return o
+}
+
+type ErrBuildScriptMergeConflict struct {
+	ProjectDir string
+}
+
+func (e *ErrBuildScriptMergeConflict) Error() string {
+	return "build script merge conflict"
+}
+
+func (p *Pull) Run(params *PullParams) (rerr error) {
+	defer rationalizeError(&rerr)
+
 	if p.project == nil {
-		return locale.NewInputError("err_no_project")
+		return rationalize.ErrNoProject
 	}
+	p.out.Notice(locale.Tr("operating_message", p.project.NamespaceString(), p.project.Dir()))
 
-	if p.project.IsHeadless() && params.SetProject == "" {
+	if p.project.IsHeadless() {
 		return locale.NewInputError("err_pull_headless", "You must first create a project. Please visit {{.V0}} to create your project.", p.project.URL())
 	}
 
-	if !p.project.IsHeadless() && p.project.BranchName() == "" {
-		return locale.NewError("err_pull_branch", "Your [NOTICE]activestate.yaml[/RESET] project field does not contain a branch. Please ensure you are using the latest version of the State Tool by running [ACTIONABLE]`state update`[/RESET] and then trying again.")
+	if p.project.BranchName() == "" {
+		return locale.NewError("err_pull_branch", "Your [NOTICE]activestate.yaml[/RESET] project field does not contain a branch. Please ensure you are using the latest version of the State Tool by running '[ACTIONABLE]state update[/RESET]' and then trying again.")
 	}
 
 	// Determine the project to pull from
-	remoteProject, err := resolveRemoteProject(p.project, params.SetProject)
+	remoteProject, err := resolveRemoteProject(p.project)
 	if err != nil {
 		return errs.Wrap(err, "Unable to determine target project")
 	}
 
 	var localCommit *strfmt.UUID
-	if p.project.CommitUUID() != "" {
-		v := p.project.CommitUUID()
-		localCommit = &v
+	localCommitID, err := localcommit.Get(p.project.Dir())
+	if err != nil {
+		return errs.Wrap(err, "Unable to get local commit")
 	}
-
-	if params.SetProject != "" {
-		defaultChoice := params.Force
-		confirmed, err := p.prompt.Confirm(
-			locale.T("confirm"),
-			locale.Tl("confirm_unrelated_pull_set_project",
-				"If you switch to {{.V0}}, you may lose changes to your project. Are you sure you want to do this?", remoteProject.String()),
-			&defaultChoice)
-		if err != nil {
-			return locale.WrapError(err, "err_pull_confirm", "Failed to get user confirmation to update project")
-		}
-		if !confirmed {
-			return locale.NewInputError("err_pull_aborted", "Pull aborted by user")
-		}
-
-		err = p.project.Source().SetNamespace(remoteProject.Owner, remoteProject.Project)
-		if err != nil {
-			return locale.WrapError(err, "err_pull_update_namespace", "Cannot update the namespace in your project file.")
-		}
+	if localCommitID != "" {
+		localCommit = &localCommitID
 	}
 
 	remoteCommit := remoteProject.CommitID
 	resultingCommit := remoteCommit // resultingCommit is the commit we want to update the local project file with
 
 	if localCommit != nil {
-		strategies, err := model.MergeCommit(*remoteCommit, *localCommit)
+		commonParent, err := model.CommonParent(localCommit, remoteCommit, p.auth)
 		if err != nil {
-			if errors.Is(err, model.ErrMergeFastForward) {
-				// No merge necessary
-				resultingCommit = localCommit
-			} else if !errors.Is(err, model.ErrMergeCommitInHistory) {
-				return locale.WrapError(err, "err_mergecommit", "Could not detect if merge is necessary.")
+			return errs.Wrap(err, "Unable to determine common parent")
+		}
+
+		if commonParent == nil {
+			return &errNoCommonParent{
+				*localCommit,
+				*remoteCommit,
 			}
 		}
-		if err == nil && strategies != nil {
-			c, err := p.performMerge(strategies, *remoteCommit)
+
+		// Attempt to fast-forward merge. This will succeed if the commits are
+		// compatible, meaning that we can simply update the local commit ID to
+		// the remoteCommit ID. The commitID returned from MergeCommit with this
+		// strategy should just be the remote commit ID.
+		// If this call fails then we will try a recursive merge.
+		strategy := types.MergeCommitStrategyFastForward
+
+		bp := buildplanner.NewBuildPlannerModel(p.auth, p.svcModel)
+		params := &buildplanner.MergeCommitParams{
+			Owner:     remoteProject.Owner,
+			Project:   remoteProject.Project,
+			TargetRef: localCommit.String(),
+			OtherRef:  remoteCommit.String(),
+			Strategy:  strategy,
+		}
+
+		resultCommit, mergeErr := bp.MergeCommit(params)
+		if mergeErr != nil {
+			logging.Debug("Merge with fast-forward failed with error: %s, trying recursive overwrite", mergeErr.Error())
+			strategy = types.MergeCommitStrategyRecursiveKeepOnConflict
+			c, err := p.performMerge(*remoteCommit, *localCommit, remoteProject, p.project.BranchName(), strategy)
 			if err != nil {
+				p.notifyMergeStrategy(anaConst.LabelVcsConflictMergeStrategyFailed, *localCommit, remoteProject)
 				return errs.Wrap(err, "performing merge commit failed")
 			}
 			resultingCommit = &c
+		} else {
+			logging.Debug("Fast-forward merge succeeded, setting commit ID to %s", resultCommit.String())
+			resultingCommit = &resultCommit
 		}
+
+		p.notifyMergeStrategy(string(strategy), *localCommit, remoteProject)
 	}
 
-	// Update the commit ID in the activestate.yaml
-	if p.project.CommitID() != resultingCommit.String() {
-		err := p.project.Source().SetCommit(resultingCommit.String(), false)
-		if err != nil {
-			return locale.WrapError(err, "err_pull_update", "Cannot update the commit in your project file.")
+	commitID, err := localcommit.Get(p.project.Dir())
+	if err != nil {
+		return errs.Wrap(err, "Unable to get local commit")
+	}
+
+	if commitID != *resultingCommit {
+		if p.cfg.GetBool(constants.OptinBuildscriptsConfig) {
+			err := p.mergeBuildScript(*remoteCommit, *localCommit)
+			if err != nil {
+				var errBuildScriptMergeConflict *ErrBuildScriptMergeConflict
+				if errors.As(err, &errBuildScriptMergeConflict) {
+					err2 := localcommit.Set(p.project.Dir(), remoteCommit.String())
+					if err2 != nil {
+						err = errs.Pack(err, errs.Wrap(err2, "Could not set local commit to remote commit after build script merge conflict"))
+					}
+				}
+				return errs.Wrap(err, "Could not merge local build script with remote changes")
+			}
 		}
 
-		p.out.Print(&outputFormat{
+		err := localcommit.Set(p.project.Dir(), resultingCommit.String())
+		if err != nil {
+			return errs.Wrap(err, "Unable to set local commit")
+		}
+
+		p.out.Print(&pullOutput{
 			locale.Tr("pull_updated", remoteProject.String(), resultingCommit.String()),
 			true,
 		})
 	} else {
-		p.out.Print(&outputFormat{
-			locale.Tl("pull_not_updated", "Your activestate.yaml is already up to date."),
+		p.out.Print(&pullOutput{
+			locale.Tl("pull_not_updated", "Your project is already up to date."),
 			false,
 		})
 	}
 
-	err = runbits.RefreshRuntime(p.auth, p.out, p.analytics, p.project, storage.CachePath(), *resultingCommit, true, target.TriggerPull, p.svcModel)
+	_, err = runtime_runbit.Update(p.prime, trigger.TriggerPull)
 	if err != nil {
 		return locale.WrapError(err, "err_pull_refresh", "Could not refresh runtime after pull")
 	}
@@ -169,53 +226,92 @@ func (p *Pull) Run(params *PullParams) error {
 	return nil
 }
 
-func (p *Pull) performMerge(strategies *mono_models.MergeStrategies, remoteCommit strfmt.UUID) (strfmt.UUID, error) {
-	p.out.Notice(output.Heading(locale.Tl("pull_diverged", "Merging history")))
+func (p *Pull) performMerge(remoteCommit, localCommit strfmt.UUID, namespace *project.Namespaced, branchName string, strategy types.MergeStrategy) (strfmt.UUID, error) {
+	p.out.Notice(output.Title(locale.Tl("pull_diverged", "Merging history")))
 	p.out.Notice(locale.Tr(
 		"pull_diverged_message",
-		p.project.Namespace().String(), p.project.BranchName(), p.project.CommitID(), remoteCommit.String()))
+		namespace.String(), branchName, localCommit.String(), remoteCommit.String()),
+	)
 
-	commitMessage := locale.Tr("pull_merge_commit", remoteCommit.String(), p.project.CommitID())
-	resultCommit, err := model.CommitChangeset(remoteCommit, commitMessage, strategies.OverwriteChanges)
+	bp := buildplanner.NewBuildPlannerModel(p.auth, p.svcModel)
+	params := &buildplanner.MergeCommitParams{
+		Owner:     namespace.Owner,
+		Project:   namespace.Project,
+		TargetRef: localCommit.String(),
+		OtherRef:  remoteCommit.String(),
+		Strategy:  strategy,
+	}
+	resultCommit, err := bp.MergeCommit(params)
 	if err != nil {
 		return "", locale.WrapError(err, "err_pull_merge_commit", "Could not create merge commit.")
 	}
 
-	cmit, err := model.GetCommit(resultCommit)
+	cmit, err := model.GetCommit(resultCommit, p.auth)
 	if err != nil {
 		return "", locale.WrapError(err, "err_pull_getcommit", "Could not inspect resulting commit.")
 	}
-	p.out.Notice(locale.Tl(
-		"pull_diverged_changes",
-		"The following changes will be merged:\n{{.V0}}\n", strings.Join(commit.FormatChanges(cmit), "\n")))
+	if changes, _ := commit.FormatChanges(cmit); len(changes) > 0 {
+		p.out.Notice(locale.Tl(
+			"pull_diverged_changes",
+			"The following changes will be merged:\n{{.V0}}\n", strings.Join(changes, "\n")),
+		)
+	}
 
 	return resultCommit, nil
 }
 
-func resolveRemoteProject(prj *project.Project, overwrite string) (*project.Namespaced, error) {
-	ns := prj.Namespace()
-	if overwrite != "" {
-		var err error
-		ns, err = project.ParseNamespace(overwrite)
-		if err != nil {
-			return nil, locale.WrapInputError(err, "pull_set_project_parse_err", "Failed to parse namespace {{.V0}}", overwrite)
-		}
+// mergeBuildScript merges the local build script with the remote buildscript.
+func (p *Pull) mergeBuildScript(remoteCommit, localCommit strfmt.UUID) error {
+	// Get the build script to merge.
+	scriptA, err := buildscript_runbit.ScriptFromProject(p.project)
+	if err != nil {
+		return errs.Wrap(err, "Could not get local build script")
 	}
 
-	// Retrieve commit ID to set the project to (if unset)
-	if overwrite != "" {
-		branch, err := model.DefaultBranchForProjectName(ns.Owner, ns.Project)
-		if err != nil {
-			return nil, locale.WrapError(err, "err_pull_commit", "Could not retrieve the latest commit for your project.")
+	// Get the local and remote build expressions to merge.
+	bp := buildplanner.NewBuildPlannerModel(p.auth, p.svcModel)
+	scriptB, err := bp.GetBuildScript(remoteCommit.String())
+	if err != nil {
+		return errs.Wrap(err, "Unable to get buildexpression and time for remote commit")
+	}
+
+	// Compute the merge strategy.
+	strategies, err := model.MergeCommit(remoteCommit, localCommit)
+	if err != nil {
+		if errors.Is(err, model.ErrMergeFastForward) || errors.Is(err, model.ErrMergeCommitInHistory) {
+			return buildscript_runbit.Update(p.project, scriptB)
 		}
-		ns.CommitID = branch.CommitID
-	} else {
-		var err error
-		ns.CommitID, err = model.BranchCommitID(ns.Owner, ns.Project, prj.BranchName())
+		return locale.WrapError(err, "err_mergecommit", "Could not detect if merge is necessary.")
+	}
+
+	// Attempt the merge.
+	err = scriptA.Merge(scriptB, strategies)
+	if err != nil {
+		err := buildscript_runbit.GenerateAndWriteDiff(p.project, scriptA, scriptB)
 		if err != nil {
-			return nil, locale.WrapError(err, "err_pull_commit_branch", "Could not retrieve the latest commit for your project and branch.")
+			return locale.WrapError(err, "err_diff_build_script", "Unable to generate differences between local and remote build script")
 		}
+		return &ErrBuildScriptMergeConflict{p.project.Dir()}
+	}
+
+	// Write the merged build expression as a local build script.
+	return buildscript_runbit.Update(p.project, scriptA)
+}
+
+func resolveRemoteProject(prj *project.Project) (*project.Namespaced, error) {
+	ns := prj.Namespace()
+	var err error
+	ns.CommitID, err = model.BranchCommitID(ns.Owner, ns.Project, prj.BranchName())
+	if err != nil {
+		return nil, locale.WrapError(err, "err_pull_commit_branch", "Could not retrieve the latest commit for your project and branch.")
 	}
 
 	return ns, nil
+}
+
+func (p *Pull) notifyMergeStrategy(strategy string, commitID strfmt.UUID, namespace *project.Namespaced) {
+	p.analytics.EventWithLabel(anaConst.CatInteractions, anaConst.ActVcsConflict, strategy, &dimensions.Values{
+		CommitID:         ptr.To(commitID.String()),
+		ProjectNameSpace: ptr.To(namespace.String()),
+	})
 }

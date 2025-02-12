@@ -56,7 +56,7 @@ func TestIsError(t *testing.T) {
 			"WrapError over NewInputError",
 			locale.WrapError(locale.NewInputError("", "Input error"), "", "Wrapper"),
 			"Wrapper",
-			"Wrapper,Input error",
+			"Wrapper: Input error",
 			true,
 			true,
 		},
@@ -74,8 +74,8 @@ func TestIsError(t *testing.T) {
 			}
 
 			if tt.isError {
-				if joinmessage := locale.JoinErrors(tt.err, ","); joinmessage.Error() != tt.wantJoinMessage {
-					t.Errorf("JoinMessage did not match, want: %s, got: %s", tt.wantJoinMessage, joinmessage.Error())
+				if joinmessage := locale.JoinedErrorMessage(tt.err); joinmessage != tt.wantJoinMessage {
+					t.Errorf("JoinMessage did not match, want: %s, got: %s", tt.wantJoinMessage, joinmessage)
 				}
 				ee, ok := tt.err.(errs.Errorable)
 				if !ok {
@@ -92,6 +92,88 @@ func TestIsError(t *testing.T) {
 						t.Errorf("Stack should not contain reference to locale package.\nFound: %s at frame %d. Full stack:\n%s", frame.Path, i, ee.Stack().String())
 						t.FailNow()
 					}
+				}
+			}
+		})
+	}
+}
+
+func TestUnwrapError(t *testing.T) {
+	errPlain := errors.New("plain error")
+	errLocalized := locale.NewError("localized error")
+	errLocalized2 := locale.NewError("localized error 2")
+	errLocalizedForWrapWithLocale := locale.NewError("localized error for wrap with locale")
+	errLocaleWrapWithPlain := locale.WrapError(errPlain, "wrapped localized error")
+	errPlainWrapWithLocale := errs.Wrap(errLocalizedForWrapWithLocale, "wrapped plain error")
+	errMultiWithLocaleWrap := errs.Pack(errPlain, errPlainWrapWithLocale)
+	errMulti := errs.Pack(errLocalized, errLocalized2, errPlain, errPlainWrapWithLocale, errLocaleWrapWithPlain)
+	errPlainWrappedMulti := errs.Wrap(errMulti, "wrapped plain error")
+
+	type customType struct{ *locale.LocalizedError }
+	errCustomTypedInner := locale.NewError("custom typed")
+	errCustomTyped := &customType{errCustomTypedInner}
+
+	tests := []struct {
+		name       string
+		inError    error
+		wantErrors []locale.ErrorLocalizer
+	}{
+		{
+			"Plain",
+			errPlain,
+			[]locale.ErrorLocalizer{},
+		},
+		{
+			"Localized",
+			errLocalized,
+			[]locale.ErrorLocalizer{errLocalized},
+		},
+		{
+			"Localized wrapped with plain",
+			errLocaleWrapWithPlain,
+			[]locale.ErrorLocalizer{errLocaleWrapWithPlain},
+		},
+		{
+			"Plain wrapped with localized",
+			errPlainWrapWithLocale,
+			[]locale.ErrorLocalizer{errLocalizedForWrapWithLocale},
+		},
+		{
+			"Multi error",
+			errMulti,
+			[]locale.ErrorLocalizer{errLocalized, errLocalized2, errLocalizedForWrapWithLocale, errLocaleWrapWithPlain},
+		},
+		{
+			"Plain wrapped Multi error",
+			errPlainWrappedMulti,
+			[]locale.ErrorLocalizer{errLocalized, errLocalized2, errLocalizedForWrapWithLocale, errLocaleWrapWithPlain},
+		},
+		{
+			"Multi error with locale wrap",
+			errMultiWithLocaleWrap,
+			[]locale.ErrorLocalizer{errLocalizedForWrapWithLocale},
+		},
+		{
+			"Custom typed",
+			errCustomTyped,
+			[]locale.ErrorLocalizer{errCustomTypedInner},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := locale.UnpackError(tt.inError)
+
+			if len(got) != len(tt.wantErrors) {
+				t.Errorf("UnwrapError() has %d results: %v, want %d results: %v", len(got), got, len(tt.wantErrors), tt.wantErrors)
+			}
+
+			for n, wantErr := range tt.wantErrors {
+				gotErr, ok := got[n].(locale.ErrorLocalizer)
+				if !ok {
+					t.Fatalf("Error is not localized, this shouldn't have happened since UnpackError should only return localized errors")
+				}
+				if gotErr.LocaleError() != wantErr.LocaleError() {
+					t.Errorf("Resulting error: %s, did not match: %s", got[n].Error(), wantErr.Error())
 				}
 			}
 		})

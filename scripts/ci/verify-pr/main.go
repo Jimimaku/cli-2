@@ -6,10 +6,9 @@ import (
 	"sort"
 	"strconv"
 	"strings"
-	"time"
 
-	"github.com/ActiveState/cli/internal/download"
 	"github.com/ActiveState/cli/internal/errs"
+	"github.com/ActiveState/cli/internal/httputil"
 	wc "github.com/ActiveState/cli/scripts/internal/workflow-controllers"
 	wh "github.com/ActiveState/cli/scripts/internal/workflow-helpers"
 	"github.com/andygrunwald/go-jira"
@@ -17,11 +16,6 @@ import (
 	"github.com/google/go-github/v45/github"
 	"golang.org/x/net/context"
 )
-
-// cutoff tells the script not to look at PRs before this date.
-// We're assuming here that no release is under development for more than 3 months
-// This saves us having to process all PRs since we started development.
-var cutoff = time.Now().Add(-(3 * 31 * 24 * time.Hour))
 
 /*
 - Pushes to fixVersion PR should verify that it has all the intended PRs for that version
@@ -112,8 +106,34 @@ func verifyVersionRC(ghClient *github.Client, jiraClient *jira.Client, pr *githu
 	}
 	finish()
 
+	finish = wc.PrintStart("Fetching previous version PR")
+	prevVersionPR, err := wh.FetchVersionPR(ghClient, wh.AssertLT, version)
+	if err != nil {
+		return errs.Wrap(err,
+			"Failed to find previous version PR for %s.", version.String())
+	}
+	wc.Print("Got: %s\n", prevVersionPR.GetTitle())
+	finish()
+
+	finish = wc.PrintStart("Verifying we have all the commits from the previous version PR, comparing %s to %s", pr.Head.GetRef(), prevVersionPR.Head.GetRef())
+	behind, err := wh.GetCommitsBehind(ghClient, prevVersionPR.Head.GetRef(), pr.Head.GetRef())
+	if err != nil {
+		return errs.Wrap(err, "Failed to compare to previous version PR")
+	}
+	if len(behind) > 0 {
+		commits := []string{}
+		for _, c := range behind {
+			commits = append(commits, c.GetSHA()+": "+c.GetCommit().GetMessage())
+		}
+		return errs.New("PR is behind the previous version PR (%s) by %d commits, missing commits:\n%s",
+			prevVersionPR.GetTitle(), len(behind), strings.Join(commits, "\n"))
+	}
+	finish()
+
 	finish = wc.PrintStart("Fetching commits for PR %d", pr.GetNumber())
-	commits, err := wh.FetchCommitsByRef(ghClient, pr.GetHead().GetSHA(), nil)
+	commits, err := wh.FetchCommitsByRef(ghClient, pr.GetHead().GetSHA(), func(commit *github.RepositoryCommit) bool {
+		return commit.GetSHA() == prevVersionPR.GetHead().GetSHA()
+	})
 	if err != nil {
 		return errs.Wrap(err, "Failed to fetch commits")
 	}
@@ -138,9 +158,9 @@ func verifyVersionRC(ghClient *github.Client, jiraClient *jira.Client, pr *githu
 		if !isFound {
 			issue := jiraIDs[jiraID]
 			if wh.IsMergedStatus(issue.Fields.Status.Name) {
-				notFoundCritical = append(notFoundCritical, issue.Key)
+				notFoundCritical = append(notFoundCritical, issue.Key+": "+jiraIDs[jiraID].Fields.Summary)
 			} else {
-				notFound = append(notFound, issue.Key)
+				notFound = append(notFound, issue.Key+": "+jiraIDs[jiraID].Fields.Summary)
 			}
 		}
 	}
@@ -150,8 +170,8 @@ func verifyVersionRC(ghClient *github.Client, jiraClient *jira.Client, pr *githu
 
 	if len(notFound) > 0 {
 		return errs.New("PR not ready as it's still missing commits for the following JIRA issues:\n"+
-			"Pending story completion: %s\n"+
-			"Missing stories: %s", strings.Join(notFound, ", "), strings.Join(notFoundCritical, ", "))
+			"Pending story completion:\n%s\n\n"+
+			"Missing stories:\n%s", strings.Join(notFound, "\n"), strings.Join(notFoundCritical, "\n"))
 	}
 	finish()
 
@@ -183,7 +203,10 @@ func verifyPR(jiraClient *jira.Client, pr *github.PullRequest) error {
 
 	// Grab latest version on release channel to use as cutoff
 	finish = wc.PrintStart("Fetching latest version on release channel")
-	latestReleaseversionBytes, err := download.Get("https://raw.githubusercontent.com/ActiveState/cli/release/version.txt")
+	latestReleaseversionBytes, err := httputil.Get("https://raw.githubusercontent.com/ActiveState/cli/release/version.txt")
+	if err != nil {
+		return errs.Wrap(err, "failed to fetch latest release version")
+	}
 	latestReleaseversion, err := semver.Parse(strings.TrimSpace(string(latestReleaseversionBytes)))
 	if err != nil {
 		return errs.Wrap(err, "failed to parse version blob")
@@ -206,7 +229,7 @@ func verifyPR(jiraClient *jira.Client, pr *github.PullRequest) error {
 	}
 
 	finish = wc.PrintStart("Validating target branch")
-	if err := wh.ValidVersionBranch(pr.GetBase().GetRef(), version); err != nil {
+	if err := wh.ValidVersionBranch(pr.GetBase().GetRef(), version.Version); err != nil {
 		return errs.Wrap(err, "Invalid target branch, ensure your PR is targeting a versioned branch")
 	}
 	finish()

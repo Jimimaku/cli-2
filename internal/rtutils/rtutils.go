@@ -6,6 +6,21 @@ import (
 	"time"
 )
 
+// packedErrors effectively duplicates the functionality of errs.PackedErrors, but is here to avoid a circular dependency
+type packedErrors struct {
+	errors []error
+}
+
+func (e *packedErrors) IsTransient() {}
+
+func (e *packedErrors) Error() string {
+	return "packed multiple errors from rtutils"
+}
+
+func (e *packedErrors) Unwrap() []error {
+	return e.errors
+}
+
 // Returns path of currently running Go file
 func CurrentFile() string {
 	pc := make([]uintptr, 2)
@@ -17,8 +32,8 @@ func CurrentFile() string {
 	pc = pc[:n]
 	frames := runtime.CallersFrames(pc)
 
-	frame, _ := frames.Next()
-	frame, _ = frames.Next() // Skip rtutils.go
+	frames.Next()
+	frame, _ := frames.Next() // Skip rtutils.go
 
 	return frame.File
 }
@@ -31,7 +46,7 @@ func Closer(closer func() error, rerr *error) {
 	err := closer()
 	if err != nil {
 		if *rerr != nil {
-			*rerr = fmt.Errorf("%s: %w", err.Error(), *rerr)
+			*rerr = &packedErrors{append([]error{*rerr}, err)}
 		} else {
 			*rerr = err
 		}

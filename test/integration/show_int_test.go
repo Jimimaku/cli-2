@@ -5,7 +5,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/stretchr/testify/suite"
+	"github.com/ActiveState/cli/internal/testhelpers/suite"
 
 	"github.com/ActiveState/cli/internal/constants"
 	"github.com/ActiveState/cli/internal/fileutils"
@@ -18,21 +18,27 @@ type ShowIntegrationTestSuite struct {
 }
 
 func (suite *ShowIntegrationTestSuite) TestShow() {
-	suite.OnlyRunForTags(tagsuite.Show, tagsuite.VSCode)
+	suite.OnlyRunForTags(tagsuite.Show)
 	ts := e2e.New(suite.T(), false)
 	defer ts.Close()
 
-	suite.PrepareActiveStateYAML(ts)
+	suite.PrepareProject(ts)
 
 	cp := ts.Spawn("show")
 	cp.Expect(`Name`)
 	cp.Expect(`Show`)
 	cp.Expect(`Organization`)
 	cp.Expect(`cli-integration-tests`)
+	cp.Expect(`Namespace`)
+	cp.Expect(`cli-integration-tests/Show`)
+	cp.Expect(`Location`)
+	cp.Expect(ts.Dirs.Work)
+	cp.Expect(`Executables`)
+	cp.Expect(ts.Dirs.Cache)
 	cp.Expect(`Visibility`)
 	cp.Expect(`Public`)
 	cp.Expect(`Latest Commit`)
-	cp.ExpectLongString(`d5d84598-fc2e-4a45-b075-a845e587b5bf`)
+	cp.Expect(`d5d84598-fc2e-4a45-b075-a845e587b5bf`)
 	cp.Expect(`Events`)
 	cp.Expect(`• FIRST_INSTALL`)
 	cp.Expect(`• AFTER_UPDATE`)
@@ -51,9 +57,9 @@ func (suite *ShowIntegrationTestSuite) TestShowWithoutBranch() {
 	ts := e2e.New(suite.T(), false)
 	defer ts.Close()
 
-	ts.PrepareActiveStateYAML(`project: https://platform.activestate.com/cli-integration-tests/Show?commitID=e8f3b07b-502f-4763-83c1-763b9b952e18`)
+	ts.PrepareProject("cli-integration-tests/Show", "e8f3b07b-502f-4763-83c1-763b9b952e18")
 
-	cp := ts.SpawnWithOpts(e2e.WithArgs("show"))
+	cp := ts.Spawn("show")
 	cp.ExpectExitCode(0)
 
 	contents, err := fileutils.ReadFile(filepath.Join(ts.Dirs.Work, constants.ConfigFileName))
@@ -62,16 +68,14 @@ func (suite *ShowIntegrationTestSuite) TestShowWithoutBranch() {
 	suite.Contains(string(contents), "branch="+constants.DefaultBranchName)
 }
 
-func (suite *ShowIntegrationTestSuite) PrepareActiveStateYAML(ts *e2e.Session) {
+func (suite *ShowIntegrationTestSuite) PrepareProject(ts *e2e.Session) {
 	asyData := strings.TrimSpace(`
-project: "https://platform.activestate.com/cli-integration-tests/Show?commitID=e8f3b07b-502f-4763-83c1-763b9b952e18&branch=main"
+project: "https://platform.activestate.com/cli-integration-tests/Show?branch=main"
 constants:
   - name: DEBUG
     value: true
   - name: PYTHONPATH
     value: '%projectDir%/src:%projectDir%/tests'
-    constraints:
-        environment: dev,qa
   - name: PYTHONPATH
     value: '%projectDir%/src:%projectDir%/tests'
 events:
@@ -87,6 +91,26 @@ scripts:
 `)
 
 	ts.PrepareActiveStateYAML(asyData)
+	ts.PrepareCommitIdFile("d5d84598-fc2e-4a45-b075-a845e587b5bf")
+}
+
+func (suite *ShowIntegrationTestSuite) TestJSON() {
+	suite.OnlyRunForTags(tagsuite.Show, tagsuite.JSON)
+	ts := e2e.New(suite.T(), false)
+	defer ts.Close()
+
+	suite.PrepareProject(ts)
+
+	cp := ts.Spawn("show", "-o", "json")
+	cp.Expect(`"project_url":`)
+	cp.Expect(`"name":`)
+	cp.Expect(`"platforms":`)
+	cp.Expect(`"languages":`)
+	cp.Expect(`"secrets":`)
+	cp.Expect(`"events":`)
+	cp.Expect(`"scripts":`)
+	cp.ExpectExitCode(0)
+	AssertValidJSON(suite.T(), cp)
 }
 
 func TestShowIntegrationTestSuite(t *testing.T) {

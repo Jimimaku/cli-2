@@ -5,8 +5,8 @@ import (
 	"testing"
 
 	"github.com/ActiveState/cli/internal/testhelpers/e2e"
+	"github.com/ActiveState/cli/internal/testhelpers/suite"
 	"github.com/ActiveState/cli/internal/testhelpers/tagsuite"
-	"github.com/stretchr/testify/suite"
 )
 
 type ScriptsIntegrationTestSuite struct {
@@ -15,16 +15,14 @@ type ScriptsIntegrationTestSuite struct {
 
 func (suite *ScriptsIntegrationTestSuite) setupConfigFile(ts *e2e.Session) {
 	configFileContent := strings.TrimSpace(`
-project: "https://platform.activestate.com/ScriptOrg/ScriptProject?commitID=00010001-0001-0001-0001-000100010001"
+project: "https://platform.activestate.com/ActiveState-CLI/Empty?branch=main&commitID=6d79f2ae-f8b5-46bd-917a-d4b2558ec7b8"
 scripts:
   - name: first-script
     value: echo "first script"
-    constraints:
-      os: macos,linux
+    if: ne .OS.Name "Windows"
   - name: first-script
     value: echo first script
-    constraints:
-      os: windows
+    if: eq .OS.Name "Windows"
   - name: second-script
     value: print("second script")
     language: python3
@@ -45,7 +43,7 @@ func (suite *ScriptsIntegrationTestSuite) TestRunInheritEnv() {
 	ts := e2e.New(suite.T(), false)
 	suite.setupConfigFile(ts)
 
-	cp := ts.SpawnWithOpts(e2e.WithArgs("run", "testenv"), e2e.AppendEnv("I_SHOULD_EXIST=I_SURE_DO_EXIST"))
+	cp := ts.SpawnWithOpts(e2e.OptArgs("run", "testenv"), e2e.OptAppendEnv("I_SHOULD_EXIST=I_SURE_DO_EXIST"))
 	cp.Expect("I_SURE_DO_EXIST")
 	cp.ExpectExitCode(0)
 }

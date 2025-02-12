@@ -23,11 +23,6 @@ func newUpdateCommand(prime *primer.Values) *captain.Command {
 				Description: locale.Tl("update_channel", "Switches to the given update channel, eg. 'release'."),
 				Value:       &params.Channel,
 			},
-			{
-				Name:        "set-version",
-				Description: locale.Tl("update_version", "Switches to the given State Tool version."),
-				Value:       &params.Version,
-			},
 		},
 		[]*captain.Argument{},
 		func(cmd *captain.Command, args []string) error {
@@ -46,20 +41,13 @@ func newUpdateLockCommand(prime *primer.Values) *captain.Command {
 	cmd := captain.NewCommand(
 		"lock",
 		locale.Tl("lock_title", "Lock the State Tool version"),
-		locale.Tl("lock_description", "Lock the State Tool at the current version, this disables automatic updates."),
+		locale.Tl("lock_description", "Lock the State Tool at the current version. This disables automatic updates."),
 		prime,
 		[]*captain.Flag{
 			{
 				Name:        "set-channel",
 				Description: locale.Tl("update_channel", "Switches to the given update channel, eg. 'release'."),
 				Value:       &params.Channel,
-			},
-			{
-				Name: "force",
-				Description: locale.Tl(
-					"flag_update_force",
-					"Automatically confirm that you would like to update the State Tool version that your project is locked to."),
-				Value: &params.Force,
 			},
 		},
 		[]*captain.Argument{},
@@ -68,6 +56,7 @@ func newUpdateLockCommand(prime *primer.Values) *captain.Command {
 		},
 	)
 	cmd.SetSkipChecks(true)
+	cmd.SetSupportsStructuredOutput()
 	return cmd
 }
 
@@ -80,15 +69,7 @@ func newUpdateUnlockCommand(prime *primer.Values) *captain.Command {
 		locale.Tl("unlock_title", "Unlock the State Tool version"),
 		locale.Tl("unlock_description", "Unlock the State Tool version for the current project."),
 		prime,
-		[]*captain.Flag{
-			{
-				Name: "force",
-				Description: locale.Tl(
-					"flag_update_unlock_force",
-					"Automatically confirm that you would like to remove the lock."),
-				Value: &params.Force,
-			},
-		},
+		[]*captain.Flag{},
 		[]*captain.Argument{},
 		func(cmd *captain.Command, args []string) error {
 			return runner.Run(&params)

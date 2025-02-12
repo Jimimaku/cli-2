@@ -1,7 +1,8 @@
 package secrets
 
 import (
-	"github.com/ActiveState/cli/internal/errs"
+	"errors"
+
 	"github.com/ActiveState/cli/internal/keypairs"
 	"github.com/ActiveState/cli/internal/locale"
 	"github.com/ActiveState/cli/internal/logging"
@@ -16,7 +17,7 @@ import (
 
 // Save will add a new secret for this user or update an existing one.
 func Save(secretsClient *secretsapi.Client, encrypter keypairs.Encrypter, org *mono_models.Organization, project *mono_models.Project,
-	isUser bool, secretName, secretValue string) error {
+	isUser bool, secretName, secretValue string, auth *authentication.Auth) error {
 
 	logging.Debug("attempting to upsert user-secret for org=%s", org.OrganizationID.String())
 	encrStr, err := encrypter.EncryptAndEncode([]byte(secretValue))
@@ -37,7 +38,7 @@ func Save(secretsClient *secretsapi.Client, encrypter keypairs.Encrypter, org *m
 
 	params.UserSecrets = append(params.UserSecrets, secretChange)
 
-	_, err = secretsClient.Secrets.Secrets.SaveAllUserSecrets(params, authentication.LegacyGet().ClientAuth())
+	_, err = secretsClient.Secrets.Secrets.SaveAllUserSecrets(params, auth.ClientAuth())
 	if err != nil {
 		multilog.Error("error saving user secret: %v", err)
 		return locale.WrapError(err, "secrets_err_save", "", err.Error())
@@ -48,22 +49,24 @@ func Save(secretsClient *secretsapi.Client, encrypter keypairs.Encrypter, org *m
 
 // ShareWithOrgUsers will share the provided secret with all other users in the organization
 // who have a valid public-key available.
-func ShareWithOrgUsers(secretsClient *secretsapi.Client, org *mono_models.Organization, project *mono_models.Project, secretName, secretValue string) error {
+func ShareWithOrgUsers(secretsClient *secretsapi.Client, org *mono_models.Organization, project *mono_models.Project, secretName, secretValue string, auth *authentication.Auth) error {
 	currentUserID, err := secretsClient.AuthenticatedUserID()
 	if err != nil {
 		return err
 	}
 
-	members, err := model.FetchOrgMembers(org.URLname)
+	members, err := model.FetchOrgMembers(org.URLname, auth)
 	if err != nil {
 		return err
 	}
 
 	for _, member := range members {
 		if currentUserID != member.User.UserID {
-			pubKey, err := keypairs.FetchPublicKey(secretsClient, member.User)
+			pubKey, err := keypairs.FetchPublicKey(secretsClient, member.User, auth)
 			if err != nil {
-				if errs.Matches(err, &keypairs.ErrKeypairNotFound{}) {
+				var errKeypairNotFound *keypairs.ErrKeypairNotFound
+
+				if errors.As(err, &errKeypairNotFound) {
 					logging.Info("User `%s` has no public-key", member.User.Username)
 					// this is okay, just do what we can
 					continue
@@ -108,7 +111,7 @@ func LoadKeypairFromConfigDir(cfg keypairs.Configurable) (keypairs.Keypair, erro
 
 // DefsByProject fetches the secret definitions for the current user relevant to the given project
 func DefsByProject(secretsClient *secretsapi.Client, owner string, projectName string) ([]*secretsModels.SecretDefinition, error) {
-	pjm, err := model.FetchProjectByName(owner, projectName)
+	pjm, err := model.LegacyFetchProjectByName(owner, projectName)
 	if err != nil {
 		return nil, err
 	}
@@ -117,15 +120,15 @@ func DefsByProject(secretsClient *secretsapi.Client, owner string, projectName s
 }
 
 // ByProject fetches the secrets for the current user relevant to the given project
-func ByProject(secretsClient *secretsapi.Client, owner string, projectName string) ([]*secretsModels.UserSecret, error) {
+func ByProject(secretsClient *secretsapi.Client, owner string, projectName string, auth *authentication.Auth) ([]*secretsModels.UserSecret, error) {
 	result := []*secretsModels.UserSecret{}
 
-	pjm, err := model.FetchProjectByName(owner, projectName)
+	pjm, err := model.LegacyFetchProjectByName(owner, projectName)
 	if err != nil {
 		return result, err
 	}
 
-	org, err := model.FetchOrgByURLName(owner)
+	org, err := model.FetchOrgByURLName(owner, auth)
 	if err != nil {
 		return result, err
 	}

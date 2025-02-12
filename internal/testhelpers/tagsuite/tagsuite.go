@@ -4,20 +4,27 @@ import (
 	"os"
 	"strings"
 
-	"github.com/ActiveState/cli/internal/condition"
-	"github.com/stretchr/testify/suite"
 	"github.com/thoas/go-funk"
+
+	"github.com/ActiveState/cli/internal/condition"
+	"github.com/ActiveState/cli/internal/testhelpers/suite"
 )
 
 const (
 	Activate        = "activate"
 	Analytics       = "analytics"
-	Alternative     = "alternative"
+	Artifacts       = "artifacts"
 	Auth            = "auth"
+	Automation      = "automation"
 	Branches        = "branches"
 	Bundle          = "bundle"
+	BuildScripts    = "buildscripts"
+	BuildInProgress = "buildinprogress"
 	Carlisle        = "carlisle"
+	Checkout        = "checkout"
 	CLIDeploy       = "cli-deploy"
+	Commit          = "commit"
+	Compatibility   = "compatibility"
 	Condition       = "condition"
 	Config          = "config"
 	Critical        = "critical"
@@ -25,54 +32,60 @@ const (
 	DeleteProjects  = "delete-uuid-projects"
 	Deploy          = "deploy"
 	Edit            = "edit"
-	Error           = "error"
+	Environment     = "environment"
+	Errors          = "error"
 	Events          = "events"
-	Export          = "export"
+	Exec            = "exec"
+	Executor        = "executor"
 	ExitCode        = "exit-code"
+	Export          = "export"
 	Fork            = "fork"
-	Headless        = "headless"
+	HelloExample    = "hello_example"
+	Help            = "help"
 	History         = "history"
 	Import          = "import"
 	Info            = "info"
 	Init            = "init"
-	InstallScripts  = "install-scripts"
+	Install         = "install"
 	Installer       = "installer"
-	RemoteInstaller = "remote-installer"
+	InstallScripts  = "install-scripts"
 	Interrupt       = "interrupt"
+	Invite          = "invite"
 	JSON            = "json"
-	Komodo          = "komodo"
 	Languages       = "languages"
-	MSI             = "msi"
+	Manifest        = "manifest"
+	Migrations      = "migrations"
+	Notifications   = "notifications"
 	Organizations   = "organizations"
 	Output          = "output"
 	Package         = "package"
+	Performance     = "performance"
 	Perl            = "perl"
 	Platforms       = "platforms"
 	Prepare         = "prepare"
+	Progress        = "progress"
+	Projects        = "projects"
+	Publish         = "publish"
 	Pull            = "pull"
 	Push            = "push"
 	Python          = "python"
+	Refresh         = "refresh"
+	RemoteInstaller = "remote-installer"
+	Reset           = "reset"
 	Revert          = "revert"
 	Run             = "run"
 	Scripts         = "scripts"
 	Secrets         = "secrets"
-	Switch          = "switch"
+	Service         = "service"
 	Shell           = "shell"
-	Exec            = "exec"
 	Show            = "show"
+	SolverV2        = "solver-v2"
+	SolverV3        = "solver-v3"
+	Switch          = "switch"
 	Uninstall       = "uninstall"
+	Upgrade         = "upgrade"
 	Update          = "update"
 	Use             = "use"
-	VSCode          = "vscode"
-	Performance     = "performance"
-	Service         = "service"
-	Executor        = "executor"
-	Deprecation     = "deprecation"
-	Compatibility   = "compatibility"
-	Automation      = "automation"
-	Checkout        = "checkout"
-	OffInstall      = "offline-install"
-	Help            = "help"
 )
 
 // Suite extends a testify suite Suite, such that tests allowing for dynamic skipping of tests
@@ -84,14 +97,14 @@ type Suite struct {
 func (suite *Suite) OnlyRunForTags(tags ...string) {
 	setTagsString, _ := os.LookupEnv("TEST_SUITE_TAGS")
 
-	setTags := strings.Split(setTagsString, ":")
+	setTags := strings.Split(strings.ToLower(setTagsString), ":")
 	// if no tags are defined and we're not on CI; run the test
 	if funk.Contains(setTags, "all") || (setTagsString == "" && !condition.OnCI()) {
 		return
 	}
 
 	for _, tag := range tags {
-		if funk.Contains(setTags, tag) {
+		if funk.Contains(setTags, strings.ToLower(tag)) {
 			return
 		}
 	}

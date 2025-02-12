@@ -6,6 +6,7 @@ import (
 	"strings"
 
 	"github.com/ActiveState/cli/internal/assets"
+	"github.com/ActiveState/cli/internal/constants"
 	"github.com/ActiveState/cli/internal/errs"
 	"github.com/ActiveState/cli/internal/fileutils"
 	"github.com/ActiveState/cli/internal/osutils/shortcut"
@@ -13,8 +14,8 @@ import (
 
 var startupPath = filepath.Join(os.Getenv("USERPROFILE"), "AppData", "Roaming", "Microsoft", "Windows", "Start Menu", "Programs", "Startup")
 
-func (a *app) enable() error {
-	enabled, err := a.IsEnabled()
+func enable(exec string, opts Options) error {
+	enabled, err := isEnabled(exec, opts)
 	if err != nil {
 		return errs.Wrap(err, "Could not check if app is enabled")
 	}
@@ -22,13 +23,13 @@ func (a *app) enable() error {
 		return nil
 	}
 
-	name := formattedName(a.Name)
-	s := shortcut.New(startupPath, name, a.Exec, a.Args...)
+	name := formattedName(opts.Name)
+	s := shortcut.New(startupPath, name, exec, opts.Args...)
 	if err := s.Enable(); err != nil {
 		return errs.Wrap(err, "Could not create shortcut")
 	}
 
-	icon, err := assets.ReadFileBytes(a.options.IconFileSource)
+	icon, err := assets.ReadFileBytes(opts.IconFileSource)
 	if err != nil {
 		return errs.Wrap(err, "Could not read asset")
 	}
@@ -37,17 +38,13 @@ func (a *app) enable() error {
 	if err != nil {
 		return errs.Wrap(err, "Could not set icon for shortcut file")
 	}
-
-	err = s.SetWindowStyle(shortcut.Minimized)
-	if err != nil {
-		return errs.Wrap(err, "Could not set shortcut to minimized")
-	}
+	s.SetWindowStyle(shortcut.Minimized)
 
 	return nil
 }
 
-func (a *app) disable() error {
-	enabled, err := a.IsEnabled()
+func disable(exec string, opts Options) error {
+	enabled, err := isEnabled(exec, opts)
 	if err != nil {
 		return errs.Wrap(err, "Could not check if app autostart is enabled")
 	}
@@ -55,19 +52,26 @@ func (a *app) disable() error {
 	if !enabled {
 		return nil
 	}
-	return os.Remove(a.shortcutFilename())
+	return os.Remove(shortcutFilename(opts.Name))
 }
 
-func (a *app) IsEnabled() (bool, error) {
-	return fileutils.FileExists(a.shortcutFilename()), nil
+func isEnabled(_ string, opts Options) (bool, error) {
+	return fileutils.FileExists(shortcutFilename(opts.Name)), nil
 }
 
-func (a *app) InstallPath() (string, error) {
-	return a.shortcutFilename(), nil
+func autostartPath(_ string, opts Options) (string, error) {
+	return shortcutFilename(opts.Name), nil
 }
 
-func (a *app) shortcutFilename() string {
-	name := formattedName(a.Name)
+func upgrade(exec string, opts Options) error {
+	return nil
+}
+
+func shortcutFilename(name string) string {
+	name = formattedName(name)
+	if testDir, ok := os.LookupEnv(constants.AutostartPathOverrideEnvVarName); ok {
+		startupPath = testDir
+	}
 	return filepath.Join(startupPath, name+".lnk")
 }
 

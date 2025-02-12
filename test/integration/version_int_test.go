@@ -3,7 +3,7 @@ package integration
 import (
 	"testing"
 
-	"github.com/stretchr/testify/suite"
+	"github.com/ActiveState/cli/internal/testhelpers/suite"
 
 	"github.com/ActiveState/cli/internal/testhelpers/e2e"
 	"github.com/ActiveState/cli/internal/testhelpers/tagsuite"
@@ -21,7 +21,7 @@ func (suite *VersionIntegrationTestSuite) TestNotDev() {
 	defer ts.Close()
 
 	cp := ts.Spawn("--version")
-	suite.NotContains(cp.TrimmedSnapshot(), "(dev)")
+	suite.NotContains(cp.Output(), "(dev)")
 	cp.ExpectExitCode(0)
 }
 

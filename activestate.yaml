@@ -1,11 +1,9 @@
-project: https://platform.activestate.com/ActiveState/cli?branch=main&commitID=7a2fb89c-4bf0-4bb8-b45e-88b0d8af10e4
+project: https://platform.activestate.com/ActiveState/cli?branch=main&commitID=9eee7512-b2ab-4600-b78b-ab0cf2e817d8
 constants:
   - name: CLI_BUILDFLAGS
     value: -ldflags="-s -w"
   - name: CLI_PKGS
     value: ./cmd/state
-  - name: SYSTRAY_PKGS
-    value: ./cmd/state-tray
   - name: DAEMON_PKGS
     value: ./cmd/state-svc
   - name: INSTALLER_PKGS
@@ -20,23 +18,6 @@ constants:
   - name: SVC_BUILDFLAGS
     if: ne .OS.Name "Windows"
     value: $constants.CLI_BUILDFLAGS
-  - name: BUILD_SYSTRAY_TARGET
-    if: ne .OS.Name "Windows"
-    value: state-tray
-  - name: BUILD_UPDLG_TARGET
-    if: ne .OS.Name "Windows"
-    value: state-update-dialog
-  - name: UPDLG_BUILDFLAGS
-    value: -ldflags="-w -X github.com/wailsapp/wails.BuildMode=${1:-debug}"
-  - name: UPDLG_BUILDFLAGS
-    if: eq .OS.Name "Linux"
-    value: -ldflags="-w -X github.com/wailsapp/wails.BuildMode=${1:-debug} -extldflags '-Wl,--wrap,pthread_sigmask $4' -linkmode external"
-  - name: SYSTRAY_BUILDFLAGS
-    if: ne .OS.Name "Windows"
-    value: $constants.CLI_BUILDFLAGS
-  - name: SYSTRAY_BUILDFLAGS
-    if: eq .OS.Name "Linux"
-    value: -ldflags="-s -w -extldflags '-Wl,--wrap,pthread_sigmask $4' -linkmode external"
   - name: BUILD_DAEMON_TARGET
     if: ne .OS.Name "Windows"
     value: state-svc
@@ -48,10 +29,11 @@ constants:
     value: state-installer
   - name: BUILD_REMOTE_INSTALLER_TARGET
     value: state-remote-installer
+  - name: INTEGRATION_TEST_REGEX
+    value: 'integration\|automation'
   - name: SET_ENV
     description: The environment settings used throughout our project
     value: |
-      GOFLAGS='-mod=vendor'
       GOPATH="${GOPATH:=`go env GOPATH`}"
       GOROOT="${GOROOT:=`go env GOROOT`}"
       export CGO_ENABLED=0
@@ -64,90 +46,93 @@ constants:
     if: ne .OS.Name "Windows"
     value: .sh
 scripts:
-  - name: install-deps
+  - name: install-deps-dev
     language: bash
+    standalone: true
+    if: ne .Shell "cmd"
     value: |
-      export GO111MODULE=on
-      goflags="${GOFLAGS}"; unset GOFLAGS
-      GOFLAGS="${goflags}"
-      pushd ~
-      go install github.com/ActiveState/gozip/cmd/gozip@e455986
-      popd
-      $scripts.install-deps-os
+      if ! type "go" &> /dev/null; then
+        echo "go is not installed. Please install Go version 1.22 or above."
+        exit 1
+      fi
+      if ! type "golangci-lint" &> /dev/null; then
+        echo "golangci-lint was not found on your PATH. Installing .."
+        go install github.com/golangci/golangci-lint/cmd/golangci-lint@v1.59.1
+      fi
+      git config core.hooksPath .githooks
+      if ! type "swagger" &> /dev/null; then
+        echo "swagger was not found on your PATH. Installing .."
+        go install github.com/go-swagger/go-swagger/cmd/swagger@v0.27.0
+      fi
+      if ! type "actionlint" &> /dev/null; then
+        echo "actionlint was not found on your PATH. Installing .."
+        go install github.com/rhysd/actionlint/cmd/actionlint@v1.6.23
+      fi
+      if { [[ "$GOOS" == "windows" ]] || [[ "$OS" == "Windows_NT" ]]; } && ! type "goversioninfo" &> /dev/null; then
+        echo "goversioninfo was not found on your PATH. Installing .."
+        GOFLAGS="" go install github.com/josephspurrier/goversioninfo/cmd/goversioninfo@v1.4.0
+      fi
   - name: install-deps-os
     language: bash
+    standalone: true
     if: ne .OS.Name "Linux"
     description: Install OS specific deps
     value: ""
-  - name: install-deps-os
-    if: eq .OS.Name "Linux"
+  - name: install-deps-ci
     language: bash
-    description: Install OS specific deps
+    standalone: true
+    if: ne .Shell "cmd"
     value: |
-      echo "Installing OS Deps"
-      if type "apt" &> /dev/null; then
-        echo "Using apt"
-        pkgs=""
-        for pkg in "libgtk-3-dev libappindicator3-dev libwebkit2gtk-4.0-dev" ; do
-          dpkg -s "${pkg}" &>/dev/null && continue
-          pkgs="$pkgs ${pkg}"
-        done
-        if [ -n "${pkgs}" ]; then
-          echo Installing packages "${pkgs}"
-          sudo apt update && sudo apt install ${pkgs} -y
-        fi
-      elif type "yum" &> /dev/null; then
-        echo "Using yum"
-        yum install -y gtk3-devel libappindicator-gtk3 webkitgtk4
+      if { [[ "$GOOS" == "windows" ]] || [[ "$OS" == "Windows_NT" ]]; } && ! type "goversioninfo" &> /dev/null; then
+        echo "goversioninfo was not found on your PATH. Installing .."
+        GOFLAGS="" go install github.com/josephspurrier/goversioninfo/cmd/goversioninfo@v1.4.0
       fi
   - name: preprocess
     language: bash
+    standalone: true
     description: Generates assets required by the project that aren't just specific to the build
     value: |
       set -e
       $constants.SET_ENV
-      go run scripts/constants-generator/main.go -- internal/constants/generated.go
-      mkdir -p build/msi
+      go run scripts/constants-generator/main.go ${@} -- internal/constants/generated.go
+      if [[ "$GOOS" == "windows" || "$OS" == "Windows_NT" ]]; then
+        go run scripts/versioninfo-generator/main.go version.txt cmd/state/versioninfo.json "State Tool"
+        go run scripts/versioninfo-generator/main.go version.txt cmd/state-svc/versioninfo.json "State Service"
+      fi
   - name: build
     language: bash
+    standalone: true
     description: Builds the project with the host OS as the target OS.
     value: |
       set -e
       $constants.SET_ENV
 
+      # Generate resource.syso for Windows
+      if [[ "$GOOS" == "windows" || "$OS" == "Windows_NT" ]]; then
+        pushd cmd/state > /dev/null
+        go generate
+        popd > /dev/null
+      fi
       go build -tags "$GO_BUILD_TAGS" -o $BUILD_TARGET_DIR/$constants.BUILD_TARGET $constants.CLI_BUILDFLAGS $constants.CLI_PKGS
-  - name: build-for
-    language: bash
-    description: Builds the project with the specified OS as the target OS. (valid values darwin, linux, windows)
-    value: |
-      set -e
-      $constants.SET_ENV
-      export GOOS=${1}
-      export GOARCH=amd64
-      [ -z "${2}" ] && >&2 echo "must provide output file as 2nd arg" && exit 1
-      go build -tags "internal $GO_BUILD_TAGS" -o ${2} $constants.CLI_BUILDFLAGS $constants.CLI_PKGS
   - name: build-svc
     language: bash
+    standalone: true
     description: Builds the state-svc daemon
     value: |
       set -e
       $constants.SET_ENV
 
+      # Generate resource.syso for Windows
+      if [[ "$GOOS" == "windows" || "$OS" == "Windows_NT" ]]; then
+        pushd cmd/state-svc > /dev/null
+        go generate
+        popd > /dev/null
+      fi
       go build -tags "$GO_BUILD_TAGS" -o $BUILD_TARGET_DIR/$constants.BUILD_DAEMON_TARGET $constants.SVC_BUILDFLAGS $constants.DAEMON_PKGS
-  - name: build-tray
-    description: Builds the State Tool system tray application
-    language: bash
-    value: |
-      set -e
-      $constants.SET_ENV
-
-      # Explicitly enable CGO for systray app. We need CGO for the web bindings
-      export CGO_ENABLED=1
-
-      go build -tags "$GO_BUILD_TAGS" -o $BUILD_TARGET_DIR/$constants.BUILD_SYSTRAY_TARGET $constants.SYSTRAY_BUILDFLAGS $constants.SYSTRAY_PKGS
   - name: build-exec
     description: Builds the State Executor application
     language: bash
+    standalone: true
     value: |
       set -e
       $constants.SET_ENV
@@ -155,8 +140,8 @@ scripts:
       go build -tags "$GO_BUILD_TAGS" -o $BUILD_TARGET_DIR/$constants.BUILD_EXEC_TARGET $constants.CLI_BUILDFLAGS $constants.EXECUTOR_PKGS
   - name: build-all
     description: Builds all our tools
-    standalone: true
     language: bash
+    standalone: true
     value: |
       set -e
       echo "Building State Tool"
@@ -169,10 +154,9 @@ scripts:
       $scripts.build-svc.path()
       echo "Building State Executor"
       $scripts.build-exec.path()
-      echo "Building State Tray App"
-      $scripts.build-tray.path()
   - name: build-installer
     language: bash
+    standalone: true
     description: Builds the state-installer
     value: |
       set -e
@@ -181,83 +165,29 @@ scripts:
       go build -tags "$GO_BUILD_TAGS" -o $BUILD_TARGET_DIR/$constants.BUILD_INSTALLER_TARGET $constants.INSTALLER_PKGS
   - name: build-remote-installer
     language: bash
+    standalone: true
     description: Builds the state-remote-installer
     value: |
       set -e
       $constants.SET_ENV
-      TARGET=$BUILD_REMOTE_INSTALLER_TARGET
+      TARGET=$constants.BUILD_REMOTE_INSTALLER_TARGET
       if [[ "$GOOS" == "windows" || "$OS" == "Windows_NT" ]]; then
-        TARGET="${BUILD_REMOTE_INSTALLER_TARGET}.exe"
+        TARGET="${constants.BUILD_REMOTE_INSTALLER_TARGET}.exe"
       fi
-      GOFLAGS="" go install github.com/josephspurrier/goversioninfo/cmd/goversioninfo@latest
+      GOFLAGS="" go install github.com/josephspurrier/goversioninfo/cmd/goversioninfo@v1.4.0
       cd cmd/state-remote-installer
       go generate
       go build -tags "$GO_BUILD_TAGS" -o ../../$BUILD_TARGET_DIR/$TARGET .
-  - name: build-updlg-all
-    description: Invokes all build steps for the update dialog
-    standalone: true
-    language: bash
-    value: |
-      set -e
-      state run build-updlg-assets
-      state run build-updlg-front
-      state run build-updlg
-  - name: build-updlg
-    description: Builds the State Tool update dialog app. Run with `prod` argument to build non-dev version.
-    standalone: true
-    language: bash
-    value: |
-      set -e
-      $constants.SET_ENV
-      CGO_ENABLED=1
-      go build -o $BUILD_TARGET_DIR/$constants.BUILD_UPDLG_TARGET $constants.UPDLG_BUILDFLAGS ./cmd/state-update-dialog
-  - name: build-updlg-front
-    description: Builds the State Tool update dialog app's frontend. Be sure to run build-updlg-assets first if you changed image assets.
-    language: bash
-    value: |
-      set -e
-      pushd cmd/state-update-dialog/frontend
-      echo "Running NPM install"
-      npm install
-      echo "Building frontend. If you updated img assets be sure to first run build-updlg-assets"
-      npm run build
-      npm run build-scss
-      popd
-  - name: build-updlg-assets
-    description: Builds the State Tool update dialog app's assets.
-    language: python3
-    value: |
-      import base64
-      import os
-      lines = []
-      for root, dirs, filenames in os.walk("./cmd/state-update-dialog/frontend/scss/img"):
-          for filename in filenames:
-              fpath = os.path.join(root, filename)
-              name, ext = os.path.splitext(os.path.basename(fpath))
-              if ext != ".png":
-                raise Exception("Only PNG's are supported, found: %s" % filename)
-              with open(fpath, "rb") as file:
-                  lines.append(".img-" + name + "{")
-                  lines.append("  background-image: url(\"data:image/png;base64," + base64.b64encode(file.read()).decode("utf-8") + "\");")
-                  lines.append("}")
-          break
-      with open("./cmd/state-update-dialog/frontend/scss/_img.scss", "w") as file:
-          file.write("\n".join(lines) + "\n")
-  - name: run-updlg
-    if: ne .OS.Name "Windows"
-    description: Runs the update dialog in debug mode
-    standalone: true
-    language: bash
-    value: |
-      go run -ldflags "-w -X github.com/wailsapp/wails.BuildMode=${1:-debug}" github.com/ActiveState/cli/cmd/state-update-dialog
   - name: install
     language: bash
+    standalone: true
     description: Installs the current HEAD version into GOBIN
     value: |
       $constants.SET_ENV
       go install $constants.CLI_BUILDFLAGS $CLI_PKGS
   - name: deploy-updates
     language: bash
+    standalone: true
     description: Deploys update files to S3. This steps is automated by CI and should never be ran manually unless you KNOW WHAT YOU'RE DOING.
     value: |
       set -e
@@ -303,100 +233,76 @@ scripts:
       cp installers/stop${constants.SCRIPT_EXT} $INSTALLERS_DIR/stop${constants.SCRIPT_EXT}
   - name: deploy-installers
     language: bash
+    standalone: true
     description: Deploys update files to S3. This steps is automated by CI and should never be ran manually unless you KNOW WHAT YOU'RE DOING.
     value: |
       go run scripts/ci/s3-deployer/main.go build/installers us-east-1 state-tool update/state
   - name: deploy-remote-installer
     language: bash
+    standalone: true
     value: |
       set -e
       $constants.SET_ENV
       go run scripts/ci/s3-deployer/main.go $BUILD_TARGET_DIR/remote-installer us-east-1 state-tool remote-installer
-  - name: deploy-msi
-    language: bash
-    value: |
-      go run scripts/ci/s3-deployer/main.go build/msi us-east-1 cli-msi /
   - name: build-workflow-assets
     language: bash
+    standalone: true
     description: Generates our github workflows
     value: |
-      $scripts.build-for.path() "windows" ./.github/deps/Windows/bin/state.exe
-      $scripts.build-for.path() "linux" ./.github/deps/Linux/bin/state
-      $scripts.build-for.path() "darwin" ./.github/deps/macOS/bin/state
-
-      GOOS=windows go build -o .github/deps/Windows/bin/parallelize.exe github.com/ActiveState/cli/scripts/ci/parallelize/
-      GOOS=linux go build -o .github/deps/Linux/bin/parallelize github.com/ActiveState/cli/scripts/ci/parallelize/
-      GOOS=darwin go build -o .github/deps/macOS/bin/parallelize github.com/ActiveState/cli/scripts/ci/parallelize/
-  - name: update-workflow-assets
-    language: bash
-    description: Generates our github workflows
-    value: |
-      [ -z "${2}" ] && >&2 echo "Usage: update-workflow-assets [branch] [version]" && exit 1
-
-      tmpDir=$(mktemp -d)
-      pushd $tmpDir
-      wget https://state-tool.s3.amazonaws.com/update/state/${1}/${2}/darwin-amd64/state-darwin-amd64-${2}.tar.gz
-      tar xzf state-darwin-amd64-${2}.tar.gz
-      cp -Rfv state-install/bin/state $project.path()/.github/deps/macOS/bin
-      cp -Rfv state-install/bin/state-svc $project.path()/.github/deps/macOS/bin
-      popd
-      rm -Rf $tmpDir
-
-      tmpDir=$(mktemp -d)
-      pushd $tmpDir
-      wget https://state-tool.s3.amazonaws.com/update/state/${1}/${2}/linux-amd64/state-linux-amd64-${2}.tar.gz
-      tar xzf state-linux-amd64-${2}.tar.gz
-      cp -Rfv state-install/bin/state $project.path()/.github/deps/Linux/bin
-      cp -Rfv state-install/bin/state-svc $project.path()/.github/deps/Linux/bin
-      popd
-      rm -Rf $tmpDir
-
-      tmpDir=$(mktemp -d)
-      pushd $tmpDir
-      wget https://state-tool.s3.amazonaws.com/update/state/${1}/${2}/windows-amd64/state-windows-amd64-${2}.zip
-      unzip state-windows-amd64-${2}.zip
-      cp -Rfv state-install/bin/state.exe $project.path()/.github/deps/Windows/bin
-      cp -Rfv state-install/bin/state-svc.exe $project.path()/.github/deps/Windows/bin
-      popd
-      rm -Rf $tmpDir
+      GOOS=windows go build -o .github/deps/Windows/amd64/bin/parallelize.exe github.com/ActiveState/cli/scripts/ci/parallelize/
+      GOOS=linux go build -o .github/deps/Linux/amd64/bin/parallelize github.com/ActiveState/cli/scripts/ci/parallelize/
+      GOOS=linux GOARCH=arm64 go build -o .github/deps/Linux/arm64/bin/parallelize github.com/ActiveState/cli/scripts/ci/parallelize/
+      GOOS=darwin go build -o .github/deps/macOS/amd64/bin/parallelize github.com/ActiveState/cli/scripts/ci/parallelize/
   - name: test
     language: bash
+    standalone: true
     description: Runs unit tests (not integration tests)
     value: |
-      ACTIVESTATE_PROJECT="" go test -v `go list ./... | grep -v api | grep -v integration | grep -v automation | grep -v expect | grep -v state-tray | grep -v state-svc`
-    standalone: true
+      go test -v `go list ./... | grep -v integration | grep -v automation | grep -v expect | grep -v state-svc | grep -v state-offline` $@
   - name: integration-tests
     language: bash
+    standalone: true
     description: Runs integration tests.
     value: |
       unset ACTIVESTATE_ACTIVATED
       export INTEGRATION_TEST_USERNAME=$secrets.project.INTEGRATION_TEST_USERNAME
       export INTEGRATION_TEST_PASSWORD=$secrets.project.INTEGRATION_TEST_PASSWORD
-      go test `go list ./... | grep "integration\|automation"` -v "${@:1}" -timeout 20m
+      go test `go list ./... | grep "${INTEGRATION_TEST_REGEX}"` -v "${@:1}" -timeout 20m
+  - name: integration-tests-build-check
+    language: bash
+    standalone: true
+    description: Builds integration tests and removes the executable artifact(s).
+    value: |
+      out="x.test"
+      go list ./... | grep "${INTEGRATION_TEST_REGEX}" | xargs -L 1 go test -o $out -c
+      [ -f $out ] && rm $out
   - name: clean
     language: bash
+    standalone: true
     description: Cleans out the build dir.
     value: |
       go clean
       rm -Rf build
   - name: run
     language: bash
+    standalone: true
     description: Builds the State Tool and runs it with `--help`
     value: |
-      $scripts.build
+      $scripts.build.path()
       build/state --help
   - name: debug
     language: bash
-    description: "Runs a remote debugger, that can be hooked into from your IDE, example usage: `state run debug activate` (will debug `state activate`)"
     standalone: true
+    description: "Runs a remote debugger that can be hooked into from your IDE. Example usage: `state run debug activate` (will debug `state activate`)"
     value: dlv debug --headless --listen=:2346 --api-version=2 github.com/ActiveState/cli/cmd/state -- $@
   - name: scripted
     language: bash
-    description: "Runs a command via 'go run'"
     standalone: true
+    description: "Runs a command via 'go run'"
     value: go run github.com/ActiveState/cli/cmd/state $@
   - name: story-cleanup
     language: bash
+    standalone: true
     description: "Runs Python script to move old stories from primary project to storage project"
     value: |
       export PT_API_TOKEN=$secrets.project.PT_API_TOKEN
@@ -406,12 +312,14 @@ scripts:
       python3 ./scripts/story-cleanup/story-cleanup.py
   - name: lint
     language: bash
+    standalone: true
     description: "Runs linting for untracked and unstaged changes (if any), or staged changes"
     value: |
       golangci-lint run --new
       actionlint
   - name: lint-staged
     language: bash
+    standalone: true
     description: "Runs linting for staged changes (skipping untracked and unstaged-only files)"
     value: |
       golangci-lint run \
@@ -424,12 +332,50 @@ scripts:
       actionlint $actionfiles
   - name: lint-all
     language: bash
+    standalone: true
     description: "Runs linting for all files"
     value: |
       golangci-lint run --no-config
       actionlint
+  - name: check-format
+    language: bash
+    standalone: true
+    description: "Checks if the code is formatted correctly"
+    value: |
+      set -e
+
+      TARGET_BRANCH=$GITHUB_BASE_REF
+      if [ "$GITHUB_BASE_REF" == "" ]; then
+        TARGET_BRANCH="master"
+      fi
+
+      if [ "$TARGET_BRANCH" == "master" ]; then
+        echo "Target branch is master, not checking for newlines"
+        exit 0
+      fi
+
+      git fetch --quiet origin $TARGET_BRANCH:refs/remotes/origin/$TARGET_BRANCH
+
+      CHANGED=$(git diff --name-only origin/$TARGET_BRANCH | grep -v testdata | grep -v vendor)
+      NO_NEWLINE=0
+      for FILE in $CHANGED; do
+          if file "$FILE" | grep -q -E 'text|ASCII'; then
+              if [ $(tail -c 1 "$FILE" | wc -l) -eq 0 ]; then
+                  echo "Missing newline at end of file: $FILE"
+                  NO_NEWLINE=1
+              fi
+          fi
+      done
+
+      if [ "$NO_NEWLINE" -ne 0 ]; then
+          echo "Error: Some text files are missing a newline at the end."
+          exit 1
+      else
+          echo "Success: All modified text files end with a newline."
+      fi
   - name: grab-mergecommits
     language: bash
+    standalone: true
     value: |
       export JIRA_USERNAME=${secrets.user.JIRA_USERNAME}
       export JIRA_TOKEN=${secrets.user.JIRA_TOKEN}
@@ -437,6 +383,7 @@ scripts:
       go run $project.path()/scripts/grab-mergecommits/main.go $1
   - name: target-version-pr
     language: bash
+    standalone: true
     value: |
       export JIRA_USERNAME=${secrets.user.JIRA_USERNAME}
       export JIRA_TOKEN=${secrets.user.JIRA_TOKEN}
@@ -444,6 +391,7 @@ scripts:
       go run $project.path()/scripts/ci/target-version-pr/main.go $1
   - name: create-version-pr
     language: bash
+    standalone: true
     value: |
       export JIRA_USERNAME=${secrets.user.JIRA_USERNAME}
       export JIRA_TOKEN=${secrets.user.JIRA_TOKEN}
@@ -451,6 +399,7 @@ scripts:
       go run $project.path()/scripts/create-version-pr/main.go $1
   - name: propagate-pr
     language: bash
+    standalone: true
     value: |
       export JIRA_USERNAME=${secrets.user.JIRA_USERNAME}
       export JIRA_TOKEN=${secrets.user.JIRA_TOKEN}
@@ -458,6 +407,7 @@ scripts:
       go run $project.path()/scripts/ci/propagate-pr/main.go $1
   - name: verify-pr
     language: bash
+    standalone: true
     value: |
       export JIRA_USERNAME=${secrets.user.JIRA_USERNAME}
       export JIRA_TOKEN=${secrets.user.JIRA_TOKEN}
@@ -465,6 +415,7 @@ scripts:
       go run $project.path()/scripts/ci/verify-pr/main.go $1
   - name: start-story
     language: bash
+    standalone: true
     value: |
       export JIRA_USERNAME=${secrets.user.JIRA_USERNAME}
       export JIRA_TOKEN=${secrets.user.JIRA_TOKEN}
@@ -472,6 +423,7 @@ scripts:
       go run $project.path()/scripts/start-story/main.go "$@"
   - name: ghapi
     language: bash
+    standalone: true
     value: |
       curl \
         -H "Accept: application/vnd.github+json" \
@@ -480,6 +432,7 @@ scripts:
   - name: benchmark-exec
     if: eq .OS.Name "Linux"
     language: bash
+    standalone: true
     description: "Benchmarks executable leveraging highly sensitive/accurate tooling"
     value: |
       # example usage:
@@ -492,28 +445,21 @@ scripts:
       fi
       perf stat -d -r 8 -e task-clock,page-faults,cycles,instructions -- ${@} >/dev/null
       ${updated} && sudo sh -c 'echo '${paranoid}' >/proc/sys/kernel/perf_event_paranoid'
+  - name: to-buildscript
+    language: bash
+    standalone: true
+    value: go run $project.path()/scripts/to-buildscript/main.go $@
+  - name: to-buildexpression
+    language: bash
+    standalone: true
+    value: go run $project.path()/scripts/to-buildexpression/main.go $@
 
 events:
   - name: activate
     if: ne .Shell "cmd"
     value: |
-      if ! type "go" &> /dev/null; then
-        echo "go is not installed. Please install Go version 1.11 or above."
-        exit 1
-      fi
-      if ! type "golangci-lint" &> /dev/null; then
-        echo "golangci-lint was not found on your PATH, installing .."
-        go install github.com/golangci/golangci-lint/cmd/golangci-lint@v1.43.0
-      fi
-      git config core.hooksPath .githooks
-      if ! type "swagger" &> /dev/null; then
-        echo "swagger was not found on your PATH, installing .."
-        go install github.com/go-swagger/go-swagger/cmd/swagger@v0.27.0
-      fi
-      if ! type "actionlint" &> /dev/null; then
-        echo "actionlint was not found on your PATH, installing .."
-        go install github.com/rhysd/actionlint/cmd/actionlint@v1.6.22
-      fi
+      $scripts.install-deps-dev.path()
   - name: file-changed
-    scope: ["internal/locale/locales"]
+    scope: [ "internal/locale/locales" ]
     value: build
+config_version: 1

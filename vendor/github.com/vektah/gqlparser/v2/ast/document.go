@@ -4,6 +4,7 @@ type QueryDocument struct {
 	Operations OperationList
 	Fragments  FragmentDefinitionList
 	Position   *Position `dump:"-"`
+	Comment    *CommentGroup
 }
 
 type SchemaDocument struct {
@@ -13,6 +14,7 @@ type SchemaDocument struct {
 	Definitions     DefinitionList
 	Extensions      DefinitionList
 	Position        *Position `dump:"-"`
+	Comment         *CommentGroup
 }
 
 func (d *SchemaDocument) Merge(other *SchemaDocument) {
@@ -33,6 +35,20 @@ type Schema struct {
 
 	PossibleTypes map[string][]*Definition
 	Implements    map[string][]*Definition
+
+	Description string
+
+	Comment *CommentGroup
+}
+
+// AddTypes is the helper to add types definition to the schema
+func (s *Schema) AddTypes(defs ...*Definition) {
+	if s.Types == nil {
+		s.Types = make(map[string]*Definition)
+	}
+	for _, def := range defs {
+		s.Types[def.Name] = def
+	}
 }
 
 func (s *Schema) AddPossibleType(name string, def *Definition) {
@@ -58,10 +74,15 @@ type SchemaDefinition struct {
 	Directives     DirectiveList
 	OperationTypes OperationTypeDefinitionList
 	Position       *Position `dump:"-"`
+
+	BeforeDescriptionComment *CommentGroup
+	AfterDescriptionComment  *CommentGroup
+	EndOfDefinitionComment   *CommentGroup
 }
 
 type OperationTypeDefinition struct {
 	Operation Operation
 	Type      string
 	Position  *Position `dump:"-"`
+	Comment   *CommentGroup
 }

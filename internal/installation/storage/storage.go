@@ -2,7 +2,6 @@ package storage
 
 import (
 	"fmt"
-	"io/ioutil"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -16,7 +15,7 @@ import (
 )
 
 func AppDataPath() (string, error) {
-	configDirs := configdir.New(constants.InternalConfigNamespace, fmt.Sprintf("%s-%s", constants.LibraryName, constants.BranchName))
+	configDirs := configdir.New(constants.InternalConfigNamespace, fmt.Sprintf("%s-%s", constants.LibraryName, constants.ChannelName))
 
 	localPath, envSet := os.LookupEnv(constants.ConfigEnvVarName)
 	if envSet {
@@ -28,6 +27,7 @@ func AppDataPath() (string, error) {
 			// panic as this only happening in tests
 			panic(err)
 		}
+		return localPath, nil
 	}
 
 	// Account for HOME dir not being set, meaning querying global folders will fail
@@ -41,7 +41,7 @@ func AppDataPath() (string, error) {
 			}
 			// Use temp dir if we're in a test (we don't want to write to our src directory)
 			var err error
-			localPath, err = ioutil.TempDir("", "cli-config-test")
+			localPath, err = os.MkdirTemp("", "cli-config-test")
 			if err != nil {
 				return "", fmt.Errorf("could not create temp dir: %w", err)
 			}
@@ -65,7 +65,7 @@ func appDataPathInTest() (string, error) {
 		return _appDataPathInTest, nil
 	}
 
-	localPath, err := ioutil.TempDir("", "cli-config")
+	localPath, err := os.MkdirTemp("", "cli-config")
 	if err != nil {
 		return "", fmt.Errorf("Could not create temp dir: %w", err)
 	}
@@ -80,7 +80,7 @@ func appDataPathInTest() (string, error) {
 }
 
 func AppDataPathWithParent(parentDir string) (string, error) {
-	configDirs := configdir.New(constants.InternalConfigNamespace, fmt.Sprintf("%s-%s", constants.LibraryName, constants.BranchName))
+	configDirs := configdir.New(constants.InternalConfigNamespace, fmt.Sprintf("%s-%s", constants.LibraryName, constants.ChannelName))
 	configDirs.LocalPath = parentDir
 	dir := configDirs.QueryFolders(configdir.Local)[0].Path
 
@@ -98,7 +98,7 @@ func CachePath() string {
 	// When running tests we use a unique cache dir that's located in a temp folder, to avoid collisions
 	if condition.InUnitTest() {
 		prefix := "state-cache-tests"
-		cachePath, err = ioutil.TempDir("", prefix)
+		cachePath, err = os.MkdirTemp("", prefix)
 		if err != nil {
 			panic(fmt.Sprintf("Could not create temp dir for CachePath testing: %v", err))
 		}
@@ -125,12 +125,6 @@ func GlobalBinDir() string {
 	return filepath.Join(CachePath(), "bin")
 }
 
-// ArtifactCacheDir is where cached artifacts are stored.
-// This is a shared cache for downloaded artifacts, not installed artifacts.
-func ArtifactCacheDir() string {
-	return filepath.Join(CachePath(), constants.ArtifactMetaDir)
-}
-
 // InstallSource returns the installation source of the State Tool
 func InstallSource() (string, error) {
 	path, err := AppDataPath()
@@ -139,16 +133,10 @@ func InstallSource() (string, error) {
 	}
 
 	installFilePath := filepath.Join(path, constants.InstallSourceFile)
-	installFileData, err := ioutil.ReadFile(installFilePath)
+	installFileData, err := os.ReadFile(installFilePath)
 	if err != nil {
 		return "unknown", nil
 	}
 
 	return strings.TrimSpace(string(installFileData)), nil
-}
-
-// Avoid circular import of "internal/config"
-type configReader interface {
-	IsSet(string) bool
-	GetString(string) string
 }

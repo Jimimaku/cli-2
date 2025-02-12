@@ -21,23 +21,25 @@ Examples:
 {{- end }}
 
 {{- childCommands .Cmd}}
+{{- if gt (len .Cmd.Arguments) 0}}
+
+Arguments:
+{{-  range .Cmd.Arguments }}
+  <{{ .Name }}> {{ if .Required }}          {{ else }}(optional){{ end }} {{ .Description }}
+{{-  end }}
+{{-  end }}
+
 {{- if .Cobra.HasAvailableFlags}}
 
 Flags:
-{{.Cobra.LocalFlags.FlagUsages | trimTrailingWhitespaces}}
+{{.Cmd.LocalFlagUsages | trimTrailingWhitespaces}}
 {{- end}}
 {{- if .Cobra.HasAvailableInheritedFlags}}
 
 Global Flags:
-{{.Cobra.InheritedFlags.FlagUsages | trimTrailingWhitespaces}}
+{{.Cmd.InheritedFlagUsages | trimTrailingWhitespaces}}
 {{- end}}
-{{- if gt (len .Cmd.Arguments) 0}}
 
-Arguments:
-    {{-  range .Cmd.Arguments }}
-  <{{ .Name }}> {{ if .Required }}          {{ else }}(optional){{ end }} {{ .Description }}
-    {{-  end }}
-{{- end}}
 {{- if .Cobra.HasHelpSubCommands}}
 
 Additional help topics:
@@ -51,15 +53,17 @@ Additional help topics:
 
 Use "{{.Cobra.CommandPath}} [command] --help" for more information about a command.
 
-{{- if .OptinUnstable }}
-
-WARNING: You have an access to list of full commands, including unstable features still in beta, in order to hide these features run:
-
-"state config set optin.unstable false"
-{{- else }}
+{{- if not .OptinUnstable}}
 
 To access the list of full commands, including unstable features still in beta, run:
 
 "state config set optin.unstable true"
 {{- end}}
+{{- end}}
+
+{{- if .OptinUnstable }}
+
+WARNING: You have access to all State Tool commands, including unstable features still in beta, in order to hide these features run:
+
+"state config set optin.unstable false"
 {{- end}}

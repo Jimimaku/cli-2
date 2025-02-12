@@ -10,11 +10,12 @@ import (
 	"github.com/ActiveState/cli/internal/locale"
 	"github.com/ActiveState/cli/internal/logging"
 	"github.com/ActiveState/cli/internal/osutils"
+	"github.com/ActiveState/cli/internal/rtutils"
 	"github.com/ActiveState/cli/internal/sighandler"
 )
 
 func NewCommand(command string, args []string, env []string) *exec.Cmd {
-	cmd := exec.Command(command, args...)
+	cmd := osutils.Command(command, args...)
 	if env != nil {
 		cmd.Env = append(os.Environ(), env...)
 	}
@@ -28,9 +29,14 @@ func Start(cmd *exec.Cmd) chan error {
 
 	cmd.Stdin, cmd.Stdout, cmd.Stderr = os.Stdin, os.Stdout, os.Stderr
 
-	cmd.Start()
-
 	errors := make(chan error, 1)
+
+	err := cmd.Start()
+	if err != nil {
+		errors <- errs.Wrap(err, "Failed to start command: %s", cmd.String())
+		close(errors)
+		return errors
+	}
 
 	go func() {
 		defer close(errors)
@@ -53,7 +59,11 @@ func Start(cmd *exec.Cmd) chan error {
 				return
 			}
 
-			errors <- errs.Wrap(err, "Command Failed: %s", cmd.String())
+			err = errs.AddTips(errs.Wrap(err, "Command Failed: %s", cmd.String()),
+				"Checking environment vars like SHELL may help resolve this.",
+			)
+			errors <- err
+
 			return
 		}
 	}()
@@ -74,8 +84,8 @@ func RunFuncByBinary(binary string) RunFunc {
 	switch {
 	case strings.Contains(bin, "bash"):
 		return runWithBash
-	case strings.Contains(bin, "cmd"):
-		return runWithCmd
+	case strings.Contains(bin, "cmd"), strings.Contains(bin, "powershell"):
+		return runWindowsShell
 	default:
 		return runDirect
 	}
@@ -97,7 +107,7 @@ func runWithBash(env []string, name string, args ...string) error {
 	return runDirect(env, "bash", "-c", quotedArgs)
 }
 
-func runWithCmd(env []string, name string, args ...string) error {
+func runWindowsShell(env []string, name string, args ...string) error {
 	ext := filepath.Ext(name)
 	switch ext {
 	case ".py":
@@ -147,16 +157,16 @@ func binaryPathCmd(env []string, name string) (string, error) {
 
 	split := strings.Split(string(out), "\r\n")
 	if len(split) == 0 {
-		return "", locale.NewInputError("err_sscommon_binary_path", name)
+		return "", locale.NewExternalError("err_sscommon_binary_path", name)
 	}
 
 	return split[0], nil
 }
 
-func runDirect(env []string, name string, args ...string) error {
+func runDirect(env []string, name string, args ...string) (rerr error) {
 	logging.Debug("Running command: %s %s", name, strings.Join(args, " "))
 
-	runCmd := exec.Command(name, args...)
+	runCmd := osutils.Command(name, args...)
 	runCmd.Stdin, runCmd.Stdout, runCmd.Stderr = os.Stdin, os.Stdout, os.Stderr
 	runCmd.Env = env
 
@@ -171,7 +181,7 @@ func runDirect(env []string, name string, args ...string) error {
 	// - https://www.pivotaltracker.com/story/show/167523128
 	bs := sighandler.NewBackgroundSignalHandler(func(_ os.Signal) {}, os.Interrupt)
 	sighandler.Push(bs)
-	defer sighandler.Pop()
+	defer rtutils.Closer(sighandler.Pop, &rerr)
 
 	err := runCmd.Run()
 	// silence exit code errors

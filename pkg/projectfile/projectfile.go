@@ -3,14 +3,14 @@ package projectfile
 import (
 	"errors"
 	"fmt"
-	"io/ioutil"
 	"net/url"
 	"os"
+	"os/user"
 	"path/filepath"
 	"regexp"
 	"runtime"
+	"strconv"
 	"strings"
-	"sync"
 	"time"
 
 	"github.com/ActiveState/cli/internal/assets"
@@ -31,7 +31,6 @@ import (
 	"github.com/ActiveState/cli/internal/sliceutils"
 	"github.com/ActiveState/cli/internal/strutils"
 	"github.com/ActiveState/cli/pkg/sysinfo"
-	"github.com/go-openapi/strfmt"
 	"github.com/google/uuid"
 	"github.com/imdario/mergo"
 	"github.com/spf13/cast"
@@ -40,14 +39,30 @@ import (
 )
 
 var (
-	urlProjectRegexStr = fmt.Sprintf(`https:\/\/[\w\.]+\/([\w_.-]*)\/([\w_.-]*)(?:\?commitID=)*([^&]*)(?:\&branch=)*(.*)`)
-	urlCommitRegexStr  = fmt.Sprintf(`https:\/\/[\w\.]+\/commit\/(.*)`)
+	urlProjectRegexStr = `https:\/\/[\w\.]+\/([\w_.-]*)\/([\w_.-]*)(?:\?commitID=)*([^&]*)(?:\&branch=)*(.*)`
+	urlCommitRegexStr  = `https:\/\/[\w\.]+\/commit\/(.*)`
 
 	// ProjectURLRe Regex used to validate project fields /orgname/projectname[?commitID=someUUID]
 	ProjectURLRe = regexp.MustCompile(urlProjectRegexStr)
 	// CommitURLRe Regex used to validate commit info /commit/someUUID
 	CommitURLRe = regexp.MustCompile(urlCommitRegexStr)
+	// deprecatedRegex covers the deprecated fields in the project file
+	deprecatedRegex = regexp.MustCompile(`(?m)^\s*(?:constraints|platforms|languages):`)
+	// nonAlphanumericRegex covers all non alphanumeric characters
+	nonAlphanumericRegex = regexp.MustCompile(`[^a-zA-Z0-9 ]+`)
 )
+
+const ConfigVersion = 1
+
+type MigratorFunc func(project *Project, configVersion int) (int, error)
+
+var migrationRunning bool
+
+var migrator MigratorFunc
+
+func RegisterMigrator(m MigratorFunc) {
+	migrator = m
+}
 
 type ErrorParseProject struct{ *locale.LocalizedError }
 
@@ -59,20 +74,18 @@ type ErrorNoDefaultProject struct{ *locale.LocalizedError }
 
 // projectURL comprises all fields of a parsed project URL
 type projectURL struct {
-	Owner      string
-	Name       string
-	CommitID   string
-	BranchName string
+	Owner          string
+	Name           string
+	LegacyCommitID string
+	BranchName     string
 }
-
-var projectMapMutex = &sync.Mutex{}
 
 const LocalProjectsConfigKey = "projects"
 
-// VersionInfo is used in cases where we only care about parsing the version field. In all other cases the version is parsed via
-// the Project struct
+// VersionInfo is used in cases where we only care about parsing the version and channel fields.
+// In all other cases the version is parsed via the Project struct
 type VersionInfo struct {
-	Branch  string
+	Channel string `yaml:"branch"` // branch for backward compatibility
 	Version string
 	Lock    string `yaml:"lock"`
 }
@@ -85,90 +98,47 @@ type ProjectSimple struct {
 // Project covers the top level project structure of our yaml
 type Project struct {
 	Project       string        `yaml:"project"`
+	ConfigVersion int           `yaml:"config_version"`
 	Lock          string        `yaml:"lock,omitempty"`
 	Environments  string        `yaml:"environments,omitempty"`
-	Platforms     []Platform    `yaml:"platforms,omitempty"`
-	Languages     Languages     `yaml:"languages,omitempty"`
 	Constants     Constants     `yaml:"constants,omitempty"`
 	Secrets       *SecretScopes `yaml:"secrets,omitempty"`
 	Events        Events        `yaml:"events,omitempty"`
 	Scripts       Scripts       `yaml:"scripts,omitempty"`
 	Jobs          Jobs          `yaml:"jobs,omitempty"`
 	Private       bool          `yaml:"private,omitempty"`
+	Cache         string        `yaml:"cache,omitempty"`
+	Portable      bool          `yaml:"portable,omitempty"`
 	path          string        // "private"
 	parsedURL     projectURL    // parsed url data
-	parsedBranch  string
+	parsedChannel string
 	parsedVersion string
-}
-
-// Platform covers the platform structure of our yaml
-type Platform struct {
-	Name         string `yaml:"name,omitempty"`
-	Os           string `yaml:"os,omitempty"`
-	Version      string `yaml:"version,omitempty"`
-	Architecture string `yaml:"architecture,omitempty"`
-	Libc         string `yaml:"libc,omitempty"`
-	Compiler     string `yaml:"compiler,omitempty"`
 }
 
 // Build covers the build map, which can go under languages or packages
 // Build can hold variable keys, so we cannot predict what they are, hence why it is a map
 type Build map[string]string
 
-// Language covers the language structure, which goes under Project
-type Language struct {
-	Name        string      `yaml:"name"`
-	Version     string      `yaml:"version,omitempty"`
-	Conditional Conditional `yaml:"if"`
-	Constraints Constraint  `yaml:"constraints,omitempty"`
-	Build       Build       `yaml:"build,omitempty"`
-	Packages    Packages    `yaml:"packages,omitempty"`
-}
-
-var _ ConstrainedEntity = Language{}
-
-// ID returns the language name
-func (l Language) ID() string {
-	return l.Name
-}
-
-// ConstraintsFilter returns the language constraints
-func (l Language) ConstraintsFilter() Constraint {
-	return l.Constraints
-}
-
-func (l Language) ConditionalFilter() Conditional {
-	return l.Conditional
-}
-
-// Languages is a slice of Language definitions
-type Languages []Language
-
-// AsConstrainedEntities boxes languages as a slice of ConstrainedEntities
-func (languages Languages) AsConstrainedEntities() (items []ConstrainedEntity) {
-	for i := range languages {
-		items = append(items, &languages[i])
-	}
-	return items
-}
-
-// MakeLanguagesFromConstrainedEntities unboxes ConstraintedEntities as Languages
-func MakeLanguagesFromConstrainedEntities(items []ConstrainedEntity) (languages []*Language) {
-	languages = make([]*Language, 0, len(items))
-	for _, v := range items {
-		if o, ok := v.(*Language); ok {
-			languages = append(languages, o)
-		}
-	}
-	return languages
+// ConstantFields are the common fields for the Constant type. This is required
+// for type composition related to its yaml.Unmarshaler implementation.
+type ConstantFields struct {
+	Conditional Conditional `yaml:"if,omitempty"`
 }
 
 // Constant covers the constant structure, which goes under Project
 type Constant struct {
-	Name        string      `yaml:"name"`
-	Value       string      `yaml:"value"`
-	Conditional Conditional `yaml:"if"`
-	Constraints Constraint  `yaml:"constraints,omitempty"`
+	NameVal        `yaml:",inline"`
+	ConstantFields `yaml:",inline"`
+}
+
+func (c *Constant) UnmarshalYAML(unmarshal func(interface{}) error) error {
+	if err := unmarshal(&c.NameVal); err != nil {
+		return err
+	}
+	if err := unmarshal(&c.ConstantFields); err != nil {
+		return err
+	}
+	return nil
 }
 
 var _ ConstrainedEntity = &Constant{}
@@ -176,11 +146,6 @@ var _ ConstrainedEntity = &Constant{}
 // ID returns the constant name
 func (c *Constant) ID() string {
 	return c.Name
-}
-
-// ConstraintsFilter returns the constant constraints
-func (c *Constant) ConstraintsFilter() Constraint {
-	return c.Constraints
 }
 
 func (c *Constant) ConditionalFilter() Conditional {
@@ -219,8 +184,7 @@ type SecretScopes struct {
 type Secret struct {
 	Name        string      `yaml:"name"`
 	Description string      `yaml:"description"`
-	Conditional Conditional `yaml:"if"`
-	Constraints Constraint  `yaml:"constraints"`
+	Conditional Conditional `yaml:"if,omitempty"`
 }
 
 var _ ConstrainedEntity = &Secret{}
@@ -228,11 +192,6 @@ var _ ConstrainedEntity = &Secret{}
 // ID returns the secret name
 func (s *Secret) ID() string {
 	return s.Name
-}
-
-// ConstraintsFilter returns the secret constraints
-func (s *Secret) ConstraintsFilter() Constraint {
-	return s.Constraints
 }
 
 func (s *Secret) ConditionalFilter() Conditional {
@@ -265,20 +224,10 @@ func MakeSecretsFromConstrainedEntities(items []ConstrainedEntity) (secrets []*S
 // it is meant to replace Constraints
 type Conditional string
 
-// Constraint covers the constraint structure, which can go under almost any other struct
-type Constraint struct {
-	OS          string `yaml:"os,omitempty"`
-	Platform    string `yaml:"platform,omitempty"`
-	Environment string `yaml:"environment,omitempty"`
-}
-
 // ConstrainedEntity is an entity in a project file that can be filtered with constraints
 type ConstrainedEntity interface {
 	// ID returns the name of the entity
 	ID() string
-
-	// ConstraintsFilter returns the specified constraints for this entity
-	ConstraintsFilter() Constraint
 
 	ConditionalFilter() Conditional
 }
@@ -287,8 +236,7 @@ type ConstrainedEntity interface {
 type Package struct {
 	Name        string      `yaml:"name"`
 	Version     string      `yaml:"version"`
-	Conditional Conditional `yaml:"if"`
-	Constraints Constraint  `yaml:"constraints,omitempty"`
+	Conditional Conditional `yaml:"if,omitempty"`
 	Build       Build       `yaml:"build,omitempty"`
 }
 
@@ -297,11 +245,6 @@ var _ ConstrainedEntity = Package{}
 // ID returns the package name
 func (p Package) ID() string {
 	return p.Name
-}
-
-// ConstraintsFilter returns the package constraints
-func (p Package) ConstraintsFilter() Constraint {
-	return p.Constraints
 }
 
 func (p Package) ConditionalFilter() Conditional {
@@ -330,14 +273,28 @@ func MakePackagesFromConstrainedEntities(items []ConstrainedEntity) (packages []
 	return packages
 }
 
+// EventFields are the common fields for the Event type. This is required
+// for type composition related to its yaml.Unmarshaler implementation.
+type EventFields struct {
+	Scope       []string    `yaml:"scope"`
+	Conditional Conditional `yaml:"if,omitempty"`
+	id          string
+}
+
 // Event covers the event structure, which goes under Project
 type Event struct {
-	Name        string      `yaml:"name"`
-	Value       string      `yaml:"value"`
-	Scope       []string    `yaml:"scope"`
-	Conditional Conditional `yaml:"if"`
-	Constraints Constraint  `yaml:"constraints,omitempty"`
-	id          string
+	NameVal     `yaml:",inline"`
+	EventFields `yaml:",inline"`
+}
+
+func (e *Event) UnmarshalYAML(unmarshal func(interface{}) error) error {
+	if err := unmarshal(&e.NameVal); err != nil {
+		return err
+	}
+	if err := unmarshal(&e.EventFields); err != nil {
+		return err
+	}
+	return nil
 }
 
 var _ ConstrainedEntity = Event{}
@@ -354,11 +311,6 @@ func (e Event) ID() string {
 		}
 	}
 	return e.id
-}
-
-// ConstraintsFilter returns the event constraints
-func (e Event) ConstraintsFilter() Constraint {
-	return e.Constraints
 }
 
 func (e Event) ConditionalFilter() Conditional {
@@ -387,16 +339,30 @@ func MakeEventsFromConstrainedEntities(items []ConstrainedEntity) (events []*Eve
 	return events
 }
 
-// Script covers the script structure, which goes under Project
-type Script struct {
-	Name        string      `yaml:"name"`
+// ScriptFields are the common fields for the Script type. This is required
+// for type composition related to its yaml.Unmarshaler implementation.
+type ScriptFields struct {
 	Description string      `yaml:"description,omitempty"`
-	Value       string      `yaml:"value"`
 	Filename    string      `yaml:"filename,omitempty"`
 	Standalone  bool        `yaml:"standalone,omitempty"`
 	Language    string      `yaml:"language,omitempty"`
-	Conditional Conditional `yaml:"if"`
-	Constraints Constraint  `yaml:"constraints,omitempty"`
+	Conditional Conditional `yaml:"if,omitempty"`
+}
+
+// Script covers the script structure, which goes under Project
+type Script struct {
+	NameVal      `yaml:",inline"`
+	ScriptFields `yaml:",inline"`
+}
+
+func (s *Script) UnmarshalYAML(unmarshal func(interface{}) error) error {
+	if err := unmarshal(&s.NameVal); err != nil {
+		return err
+	}
+	if err := unmarshal(&s.ScriptFields); err != nil {
+		return err
+	}
+	return nil
 }
 
 var _ ConstrainedEntity = Script{}
@@ -404,11 +370,6 @@ var _ ConstrainedEntity = Script{}
 // ID returns the script name
 func (s Script) ID() string {
 	return s.Name
-}
-
-// ConstraintsFilter returns the script constraints
-func (s Script) ConstraintsFilter() Constraint {
-	return s.Constraints
 }
 
 func (s Script) ConditionalFilter() Conditional {
@@ -447,12 +408,10 @@ type Job struct {
 // Jobs is a slice of jobs
 type Jobs []Job
 
-var persistentProject *Project
-
 // Parse the given filepath, which should be the full path to an activestate.yaml file
 func Parse(configFilepath string) (_ *Project, rerr error) {
 	projectDir := filepath.Dir(configFilepath)
-	files, err := ioutil.ReadDir(projectDir)
+	files, err := os.ReadDir(projectDir)
 	if err != nil {
 		return nil, locale.WrapError(err, "err_project_readdir", "Could not read project directory: {{.V0}}.", projectDir)
 	}
@@ -462,7 +421,7 @@ func Parse(configFilepath string) (_ *Project, rerr error) {
 		return nil, err
 	}
 
-	re, _ := regexp.Compile(`activestate.(\w+).yaml`)
+	re, _ := regexp.Compile(`activestate[._-](\w+)\.yaml`)
 	for _, file := range files {
 		match := re.FindStringSubmatch(file.Name())
 		if len(match) == 0 {
@@ -501,6 +460,29 @@ func Parse(configFilepath string) (_ *Project, rerr error) {
 	namespace := fmt.Sprintf("%s/%s", project.parsedURL.Owner, project.parsedURL.Name)
 	StoreProjectMapping(cfg, namespace, filepath.Dir(project.Path()))
 
+	// Migrate project file if needed
+	if !migrationRunning && project.ConfigVersion != ConfigVersion && migrator != nil {
+		// Migrations may themselves utilize the projectfile package, so we have to ensure we don't start an infinite loop
+		migrationRunning = true
+		defer func() { migrationRunning = false }()
+
+		if project.ConfigVersion > ConfigVersion {
+			return nil, locale.NewInputError("err_projectfile_version_too_high")
+		}
+		updatedConfigVersion, errMigrate := migrator(project, ConfigVersion)
+
+		// Ensure we update the config version regardless of any error that occurred, because we don't want to repeat
+		// the same version migrations
+		project.ConfigVersion = updatedConfigVersion
+		if err := NewYamlField("config_version", ConfigVersion).Save(project.Path()); err != nil {
+			return nil, errs.Pack(errMigrate, errs.Wrap(err, "Could not save config_version"))
+		}
+
+		if errMigrate != nil {
+			return nil, errs.Wrap(errMigrate, "Migrator failed")
+		}
+	}
+
 	return project, nil
 }
 
@@ -511,8 +493,6 @@ func (p *Project) Init() error {
 		return locale.WrapInputError(err, "parse_project_file_url_err", "Could not parse project url: {{.V0}}.", p.Project)
 	}
 	p.parsedURL = parsedURL
-
-	logging.Debug("Parsed URL: %v", p.parsedURL)
 
 	// Ensure branch name is set
 	if p.parsedURL.Owner != "" && p.parsedURL.BranchName == "" {
@@ -528,7 +508,7 @@ func (p *Project) Init() error {
 			return errs.Wrap(err, "ParseLock %s failed", p.Lock)
 		}
 
-		p.parsedBranch = parsedLock.Branch
+		p.parsedChannel = parsedLock.Channel
 		p.parsedVersion = parsedLock.Version
 	}
 
@@ -540,23 +520,52 @@ func parse(configFilepath string) (*Project, error) {
 		return nil, &ErrorNoProject{locale.NewInputError("err_no_projectfile")}
 	}
 
-	dat, err := ioutil.ReadFile(configFilepath)
+	dat, err := os.ReadFile(configFilepath)
 	if err != nil {
-		return nil, errs.Wrap(err, "ioutil.ReadFile %s failure", configFilepath)
+		return nil, errs.Wrap(err, "os.ReadFile %s failure", configFilepath)
+	}
+
+	return parseData(dat, configFilepath)
+}
+
+func parseData(dat []byte, configFilepath string) (*Project, error) {
+	if err := detectDeprecations(dat, configFilepath); err != nil {
+		return nil, errs.Wrap(err, "deprecations found")
 	}
 
 	project := Project{}
-	err = yaml.Unmarshal([]byte(dat), &project)
+	err2 := yaml.Unmarshal(dat, &project)
 	project.path = configFilepath
 
-	if err != nil {
-		return nil, &ErrorParseProject{locale.NewError(
+	if err2 != nil {
+		return nil, &ErrorParseProject{locale.NewExternalError(
 			"err_project_parsed",
-			"Project file `{{.V1}}` could not be parsed, the parser produced the following error: {{.V0}}", err.Error(), configFilepath),
+			"Project file `{{.V1}}` could not be parsed. The parser produced the following error: {{.V0}}", err2.Error(), configFilepath),
 		}
 	}
 
 	return &project, nil
+}
+
+func detectDeprecations(dat []byte, configFilepath string) error {
+	deprecations := deprecatedRegex.FindAllIndex(dat, -1)
+	if len(deprecations) == 0 {
+		return nil
+	}
+	deplist := []string{}
+	for _, depIdxs := range deprecations {
+		dep := strings.TrimSpace(strings.TrimSuffix(string(dat[depIdxs[0]:depIdxs[1]]), ":"))
+		deplist = append(deplist, locale.Tr("pjfile_deprecation_entry", dep, strconv.Itoa(depIdxs[0])))
+	}
+	return &ErrorParseProject{locale.NewExternalError(
+		"pjfile_deprecation_msg",
+		"", configFilepath, strings.Join(deplist, "\n"), constants.DocumentationURL+"config/#deprecation"),
+	}
+}
+
+// URL returns the project namespace's string URL from activestate.yaml.
+func (p *Project) URL() string {
+	return p.Project
 }
 
 // Owner returns the project namespace's organization
@@ -569,11 +578,6 @@ func (p *Project) Name() string {
 	return p.parsedURL.Name
 }
 
-// CommitID returns the commit ID specified in the project
-func (p *Project) CommitID() string {
-	return p.parsedURL.CommitID
-}
-
 // BranchName returns the branch name specified in the project
 func (p *Project) BranchName() string {
 	return p.parsedURL.BranchName
@@ -584,17 +588,44 @@ func (p *Project) Path() string {
 	return p.path
 }
 
+// LegacyCommitID is for use by legacy mechanics ONLY
+// It returns a pre-migrated project's commit ID from activestate.yaml.
+func (p *Project) LegacyCommitID() string {
+	return p.parsedURL.LegacyCommitID
+}
+
+// SetLegacyCommit sets the commit id within the current project file. This is done
+// in-place so that line order is preserved.
+func (p *Project) SetLegacyCommit(commitID string) error {
+	pf := NewProjectField()
+	if err := pf.LoadProject(p.Project); err != nil {
+		return errs.Wrap(err, "Could not load activestate.yaml")
+	}
+	pf.SetLegacyCommitID(commitID)
+	if err := pf.Save(p.path); err != nil {
+		return errs.Wrap(err, "Could not save activestate.yaml")
+	}
+
+	p.parsedURL.LegacyCommitID = commitID
+	p.Project = pf.String()
+	return nil
+}
+
+func (p *Project) Dir() string {
+	return filepath.Dir(p.path)
+}
+
 // SetPath sets the path of the project file and should generally only be used by tests
 func (p *Project) SetPath(path string) {
 	p.path = path
 }
 
-// VersionBranch returns the branch as it was interpreted from the lock
-func (p *Project) VersionBranch() string {
-	return p.parsedBranch
+// Channel returns the channel as it was interpreted from the lock
+func (p *Project) Channel() string {
+	return p.parsedChannel
 }
 
-// Version returns the branch as it was interpreted from the lock
+// Version returns the version as it was interpreted from the lock
 func (p *Project) Version() string {
 	return p.parsedVersion
 }
@@ -629,19 +660,6 @@ func (p *Project) parseURL() (projectURL, error) {
 	return parseURL(p.Project)
 }
 
-func validateUUID(uuidStr string) error {
-	if ok := strfmt.Default.Validates("uuid", uuidStr); !ok {
-		return locale.NewError("invalid_uuid_val", "Invalid commit ID {{.V0}} in activestate.yaml.  You could replace it with 'latest'", uuidStr)
-	}
-
-	var uuid strfmt.UUID
-	if err := uuid.UnmarshalText([]byte(uuidStr)); err != nil {
-		return locale.WrapError(err, "err_commit_id_unmarshal", "Failed to unmarshal the commit id {{.V0}} read from activestate.yaml.", uuidStr)
-	}
-
-	return nil
-}
-
 func parseURL(rawURL string) (projectURL, error) {
 	p := projectURL{}
 
@@ -658,7 +676,7 @@ func parseURL(rawURL string) (projectURL, error) {
 	path := strings.Split(u.Path, "/")
 	if len(path) > 2 {
 		if path[1] == "commit" {
-			p.CommitID = path[2]
+			p.LegacyCommitID = path[2]
 		} else {
 			p.Owner = path[1]
 			p.Name = path[2]
@@ -667,13 +685,7 @@ func parseURL(rawURL string) (projectURL, error) {
 
 	q := u.Query()
 	if c := q.Get("commitID"); c != "" {
-		p.CommitID = c
-	}
-
-	if p.CommitID != "" {
-		if err := validateUUID(p.CommitID); err != nil {
-			return p, err
-		}
+		p.LegacyCommitID = c
 	}
 
 	if b := q.Get("branch"); b != "" {
@@ -708,7 +720,9 @@ func (p *Project) save(cfg ConfigGetter, path string) error {
 		return errs.Wrap(err, "f.Write %s failed", path)
 	}
 
-	StoreProjectMapping(cfg, fmt.Sprintf("%s/%s", p.parsedURL.Owner, p.parsedURL.Name), filepath.Dir(p.Path()))
+	if cfg != nil {
+		StoreProjectMapping(cfg, fmt.Sprintf("%s/%s", p.parsedURL.Owner, p.parsedURL.Name), filepath.Dir(p.Path()))
+	}
 
 	return nil
 }
@@ -729,24 +743,6 @@ func (p *Project) SetNamespace(owner, project string) error {
 	p.parsedURL.Name = project
 	p.Project = pf.String()
 
-	return nil
-}
-
-// SetCommit sets the commit id within the current project file. This is done
-// in-place so that line order is preserved.
-// If headless is true, the project is defined by a commit-id only
-func (p *Project) SetCommit(commitID string, headless bool) error {
-	pf := NewProjectField()
-	if err := pf.LoadProject(p.Project); err != nil {
-		return errs.Wrap(err, "Could not load activestate.yaml")
-	}
-	pf.SetCommit(commitID, headless)
-	if err := pf.Save(p.path); err != nil {
-		return errs.Wrap(err, "Could not save activestate.yaml")
-	}
-
-	p.parsedURL.CommitID = commitID
-	p.Project = pf.String()
 	return nil
 }
 
@@ -773,6 +769,10 @@ func (p *Project) SetBranch(branch string) error {
 }
 
 // GetProjectFilePath returns the path to the project activestate.yaml
+// It considers projects in the following order:
+// 1. Environment variable (e.g. `state shell` sets one)
+// 2. Working directory (i.e. walk up directory tree looking for activestate.yaml)
+// 3. Fall back on default project
 func GetProjectFilePath() (string, error) {
 	defer profile.Measure("GetProjectFilePath", time.Now())
 	lookup := []func() (string, error){
@@ -794,13 +794,19 @@ func GetProjectFilePath() (string, error) {
 }
 
 func getProjectFilePathFromEnv() (string, error) {
-	projectFilePath := os.Getenv(constants.ProjectEnvVarName)
+	var projectFilePath string
+
+	if activatedProjectDirPath := os.Getenv(constants.ActivatedStateEnvVarName); activatedProjectDirPath != "" {
+		projectFilePath = filepath.Join(activatedProjectDirPath, constants.ConfigFileName)
+	}
+
 	if projectFilePath != "" {
 		if fileutils.FileExists(projectFilePath) {
 			return projectFilePath, nil
 		}
 		return "", &ErrorNoProjectFromEnv{locale.NewInputError("err_project_env_file_not_exist", "", projectFilePath)}
 	}
+
 	return "", nil
 }
 
@@ -840,40 +846,8 @@ func getProjectFilePathFromDefault() (_ string, rerr error) {
 	return path, nil
 }
 
-// Get returns the project configration in an unsafe manner (exits if errors occur)
-func Get() *Project {
-	project, err := GetSafe()
-	if err != nil {
-		multilog.Error("projectfile.Get() failed with: %s", err.Error())
-		fmt.Fprint(os.Stderr, locale.T("err_project_file_unavailable"))
-		os.Exit(1)
-	}
-
-	return project
-}
-
-// GetPersisted gets the persisted project, if any
-func GetPersisted() *Project {
-	return persistentProject
-}
-
-// GetSafe returns the project configuration in a safe manner (returns error)
-func GetSafe() (*Project, error) {
-	if persistentProject != nil {
-		return persistentProject, nil
-	}
-
-	project, err := GetOnce()
-	if err != nil {
-		return nil, err
-	}
-
-	project.Persist()
-	return project, nil
-}
-
-// GetOnce returns the project configuration in a safe manner (returns error), the same as GetSafe, but it avoids persisting the project
-func GetOnce() (*Project, error) {
+// FromEnv returns the project configuration based on environment information (env vars, cwd, etc)
+func FromEnv() (*Project, error) {
 	// we do not want to use a path provided by state if we're running tests
 	projectFilePath, err := GetProjectFilePath()
 	if err != nil {
@@ -885,7 +859,7 @@ func GetOnce() (*Project, error) {
 
 	project, err := Parse(projectFilePath)
 	if err != nil {
-		return nil, errs.Wrap(err, "Parse %s failed", projectFilePath)
+		return nil, errs.Wrap(err, "Could not parse projectfile")
 	}
 
 	return project, nil
@@ -900,14 +874,14 @@ func FromPath(path string) (*Project, error) {
 		return nil, &ErrorNoProject{locale.WrapInputError(err, "err_project_not_found", "", path)}
 	}
 
-	_, err = ioutil.ReadFile(projectFilePath)
+	_, err = os.ReadFile(projectFilePath)
 	if err != nil {
 		logging.Warning("Cannot load config file: %v", err)
 		return nil, &ErrorNoProject{locale.WrapInputError(err, "err_no_projectfile")}
 	}
 	project, err := Parse(projectFilePath)
 	if err != nil {
-		return nil, errs.Wrap(err, "Parse %s failed", projectFilePath)
+		return nil, errs.Wrap(err, "Could not parse projectfile")
 	}
 
 	return project, nil
@@ -922,14 +896,14 @@ func FromExactPath(path string) (*Project, error) {
 		return nil, &ErrorNoProject{locale.NewInputError("err_no_projectfile")}
 	}
 
-	_, err := ioutil.ReadFile(projectFilePath)
+	_, err := os.ReadFile(projectFilePath)
 	if err != nil {
 		logging.Warning("Cannot load config file: %v", err)
 		return nil, &ErrorNoProject{locale.WrapInputError(err, "err_no_projectfile")}
 	}
 	project, err := Parse(projectFilePath)
 	if err != nil {
-		return nil, errs.Wrap(err, "Parse %s failed", projectFilePath)
+		return nil, errs.Wrap(err, "Could not parse projectfile")
 	}
 
 	return project, nil
@@ -939,7 +913,6 @@ func FromExactPath(path string) (*Project, error) {
 type CreateParams struct {
 	Owner      string
 	Project    string
-	CommitID   *strfmt.UUID
 	BranchName string
 	Directory  string
 	Content    string
@@ -947,14 +920,8 @@ type CreateParams struct {
 	Private    bool
 	path       string
 	ProjectURL string
-}
-
-// TestOnlyCreateWithProjectURL a new activestate.yaml with default content
-func TestOnlyCreateWithProjectURL(projectURL, path string) (*Project, error) {
-	return createCustom(&CreateParams{
-		ProjectURL: projectURL,
-		Directory:  path,
-	}, language.Python3)
+	Cache      string
+	Portable   bool
 }
 
 // Create will create a new activestate.yaml with a projectURL for the given details
@@ -974,18 +941,18 @@ func createCustom(params *CreateParams, lang language.Language) (*Project, error
 		return nil, err
 	}
 
-	var commitID string
 	if params.ProjectURL == "" {
-		u, err := url.Parse(fmt.Sprintf("https://%s/%s/%s", constants.PlatformURL, params.Owner, params.Project))
+		// Note: cannot use api.GetPlatformURL() due to import cycle.
+		host := constants.DefaultAPIHost
+		if hostOverride := os.Getenv(constants.APIHostEnvVarName); hostOverride != "" {
+			host = hostOverride
+		}
+		u, err := url.Parse(fmt.Sprintf("https://%s/%s/%s", host, params.Owner, params.Project))
 		if err != nil {
 			return nil, errs.Wrap(err, "url parse new project url failed")
 		}
 		q := u.Query()
 
-		if params.CommitID != nil {
-			commitID = params.CommitID.String()
-			q.Set("commitID", commitID)
-		}
 		if params.BranchName != "" {
 			q.Set("branch", params.BranchName)
 		}
@@ -1014,8 +981,9 @@ func createCustom(params *CreateParams, lang language.Language) (*Project, error
 		shell = "batch"
 	}
 
+	languageDisabled := os.Getenv(constants.DisableLanguageTemplates) == "true"
 	content := params.Content
-	if content == "" && lang != language.Unset && lang != language.Unknown {
+	if !languageDisabled && content == "" && lang != language.Unset && lang != language.Unknown {
 		tplName := "activestate.yaml." + strings.TrimRight(lang.String(), "23") + ".tpl"
 		template, err := assets.ReadFileBytes(tplName)
 		if err != nil {
@@ -1023,17 +991,18 @@ func createCustom(params *CreateParams, lang language.Language) (*Project, error
 		}
 		content, err = strutils.ParseTemplate(
 			string(template),
-			map[string]interface{}{"Owner": owner, "Project": project, "Shell": shell, "Language": lang.String(), "LangExe": lang.Executable().Filename()})
+			map[string]interface{}{"Owner": owner, "Project": project, "Shell": shell, "Language": lang.String(), "LangExe": lang.Executable().Filename()},
+			nil)
 		if err != nil {
 			return nil, errs.Wrap(err, "Could not parse %s", tplName)
 		}
 	}
 
 	data := map[string]interface{}{
-		"Project":  params.ProjectURL,
-		"CommitID": commitID,
-		"Content":  content,
-		"Private":  params.Private,
+		"Project":       params.ProjectURL,
+		"Content":       content,
+		"Private":       params.Private,
+		"ConfigVersion": ConfigVersion,
 	}
 
 	tplName := "activestate.yaml.tpl"
@@ -1041,7 +1010,7 @@ func createCustom(params *CreateParams, lang language.Language) (*Project, error
 	if err != nil {
 		return nil, errs.Wrap(err, "Could not read asset")
 	}
-	fileContents, err := strutils.ParseTemplate(string(tplContents), data)
+	fileContents, err := strutils.ParseTemplate(string(tplContents), data, nil)
 	if err != nil {
 		return nil, errs.Wrap(err, "Could not parse %s", tplName)
 	}
@@ -1051,7 +1020,44 @@ func createCustom(params *CreateParams, lang language.Language) (*Project, error
 		return nil, err
 	}
 
+	if params.Cache != "" {
+		createErr := createHostFile(params.Directory, params.Cache, params.Portable)
+		if createErr != nil {
+			return nil, errs.Wrap(createErr, "Could not create cache file")
+		}
+	}
+
 	return Parse(params.path)
+}
+
+func createHostFile(filePath, cachePath string, portable bool) error {
+	user, err := user.Current()
+	if err != nil {
+		return errs.Wrap(err, "Could not get current user")
+	}
+
+	data := map[string]interface{}{
+		"Cache":    cachePath,
+		"Portable": portable,
+	}
+
+	tplName := "activestate.yaml.cache.tpl"
+	tplContents, err := assets.ReadFileBytes(tplName)
+	if err != nil {
+		return errs.Wrap(err, "Could not read asset")
+	}
+
+	fileContents, err := strutils.ParseTemplate(string(tplContents), data, nil)
+	if err != nil {
+		return errs.Wrap(err, "Could not parse %s", tplName)
+	}
+
+	// Trim any non-alphanumeric characters from the username
+	if err := fileutils.WriteFile(filepath.Join(filePath, fmt.Sprintf("activestate.%s.yaml", nonAlphanumericRegex.ReplaceAllString(user.Username, ""))), []byte(fileContents)); err != nil {
+		return errs.Wrap(err, "Could not write cache file")
+	}
+
+	return nil
 }
 
 func validateCreateParams(params *CreateParams) error {
@@ -1076,9 +1082,9 @@ func ParseVersionInfo(projectFilePath string) (*VersionInfo, error) {
 		return nil, nil
 	}
 
-	dat, err := ioutil.ReadFile(projectFilePath)
+	dat, err := os.ReadFile(projectFilePath)
 	if err != nil {
-		return nil, errs.Wrap(err, "ioutil.ReadFile %s failed", projectFilePath)
+		return nil, errs.Wrap(err, "os.ReadFile %s failed", projectFilePath)
 	}
 
 	versionStruct := VersionInfo{}
@@ -1101,7 +1107,7 @@ func ParseLock(lock string) (*VersionInfo, error) {
 	}
 
 	return &VersionInfo{
-		Branch:  split[0],
+		Channel: split[0],
 		Version: split[1],
 		Lock:    lock,
 	}, nil
@@ -1118,25 +1124,25 @@ func AddLockInfo(projectFilePath, branch, version string) error {
 	if lockRegex.Match(data) {
 		versionUpdate := []byte(fmt.Sprintf("lock: %s@%s", branch, version))
 		replaced := lockRegex.ReplaceAll(data, versionUpdate)
-		return ioutil.WriteFile(projectFilePath, replaced, 0644)
+		return os.WriteFile(projectFilePath, replaced, 0644)
 	}
 
 	projectRegex := regexp.MustCompile(fmt.Sprintf("(?m:(^project:\\s*%s))", ProjectURLRe))
 	lockString := fmt.Sprintf("%s@%s", branch, version)
 	lockUpdate := []byte(fmt.Sprintf("${1}\nlock: %s", lockString))
 
-	data, err = ioutil.ReadFile(projectFilePath)
+	data, err = os.ReadFile(projectFilePath)
 	if err != nil {
 		return err
 	}
 
 	updated := projectRegex.ReplaceAll(data, lockUpdate)
 
-	return ioutil.WriteFile(projectFilePath, updated, 0644)
+	return os.WriteFile(projectFilePath, updated, 0644)
 }
 
 func RemoveLockInfo(projectFilePath string) error {
-	data, err := ioutil.ReadFile(projectFilePath)
+	data, err := os.ReadFile(projectFilePath)
 	if err != nil {
 		return locale.WrapError(err, "err_read_projectfile", "", projectFilePath)
 	}
@@ -1144,7 +1150,7 @@ func RemoveLockInfo(projectFilePath string) error {
 	lockRegex := regexp.MustCompile(`(?m)^lock:.*`)
 	clean := lockRegex.ReplaceAll(data, []byte(""))
 
-	err = ioutil.WriteFile(projectFilePath, clean, 0644)
+	err = os.WriteFile(projectFilePath, clean, 0644)
 	if err != nil {
 		return locale.WrapError(err, "err_write_unlocked_projectfile", "Could not remove lock from projectfile")
 	}
@@ -1153,7 +1159,7 @@ func RemoveLockInfo(projectFilePath string) error {
 }
 
 func cleanVersionInfo(projectFilePath string) ([]byte, error) {
-	data, err := ioutil.ReadFile(projectFilePath)
+	data, err := os.ReadFile(projectFilePath)
 	if err != nil {
 		return nil, locale.WrapError(err, "err_read_projectfile", "", projectFilePath)
 	}
@@ -1164,7 +1170,7 @@ func cleanVersionInfo(projectFilePath string) ([]byte, error) {
 	versionRegex := regexp.MustCompile(`(?m:^version:\s*\d+.\d+.\d+-[A-Za-z0-9]+\n)`)
 	clean = versionRegex.ReplaceAll(clean, []byte(""))
 
-	err = ioutil.WriteFile(projectFilePath, clean, 0644)
+	err = os.WriteFile(projectFilePath, clean, 0644)
 	if err != nil {
 		return nil, locale.WrapError(err, "err_write_clean_projectfile", "Could not write cleaned projectfile information")
 	}
@@ -1172,30 +1178,10 @@ func cleanVersionInfo(projectFilePath string) ([]byte, error) {
 	return clean, nil
 }
 
-// Reset the current state, which unsets the persistent project
-func Reset() {
-	persistentProject = nil
-	os.Unsetenv(constants.ProjectEnvVarName)
-}
-
-// Persist "activates" the given project and makes it such that subsequent calls
-// to Get() return this project.
-// Only one project can persist at a time.
-func (p *Project) Persist() {
-	if p.Project == "" {
-		multilog.Error("projectfile.Persist() failed because no project is defined")
-		fmt.Fprint(os.Stderr, locale.T("err_invalid_project"))
-		os.Exit(1)
-	}
-	persistentProject = p
-	os.Setenv(constants.ProjectEnvVarName, p.Path())
-}
-
 type ConfigGetter interface {
 	GetStringMapStringSlice(key string) map[string][]string
 	AllKeys() []string
 	GetStringSlice(string) []string
-	IsSet(string) bool
 	GetString(string) string
 	Set(string, interface{}) error
 	GetThenSet(string, func(interface{}) (interface{}, error)) error
@@ -1311,7 +1297,7 @@ func GetProjectPaths(cfg ConfigGetter, namespace string) []string {
 	// match case-insensitively
 	var paths []string
 	for key, value := range projects {
-		if strings.ToLower(key) == strings.ToLower(namespace) {
+		if strings.EqualFold(key, namespace) {
 			paths = append(paths, value...)
 		}
 	}
@@ -1322,6 +1308,7 @@ func GetProjectPaths(cfg ConfigGetter, namespace string) []string {
 // StoreProjectMapping associates the namespace with the project
 // path in the config
 func StoreProjectMapping(cfg ConfigGetter, namespace, projectPath string) {
+	SetRecentlyUsedNamespace(cfg, namespace)
 	err := cfg.GetThenSet(
 		LocalProjectsConfigKey,
 		func(v interface{}) (interface{}, error) {
@@ -1369,7 +1356,7 @@ func StoreProjectMapping(cfg ConfigGetter, namespace, projectPath string) {
 		},
 	)
 	if err != nil {
-		multilog.Error("Could not set project mapping in config, error: %v", err)
+		multilog.Error("Could not set project mapping in config, error: %v", errs.JoinMessage(err))
 	}
 }
 
@@ -1418,5 +1405,12 @@ func CleanProjectMapping(cfg ConfigGetter) {
 	)
 	if err != nil {
 		logging.Debug("Could not clean project mapping in config, error: %v", err)
+	}
+}
+
+func SetRecentlyUsedNamespace(cfg ConfigGetter, namespace string) {
+	err := cfg.Set(constants.LastUsedNamespacePrefname, namespace)
+	if err != nil {
+		logging.Debug("Could not set recently used namespace in config, error: %v", err)
 	}
 }

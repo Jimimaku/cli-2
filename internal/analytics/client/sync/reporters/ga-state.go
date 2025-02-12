@@ -2,14 +2,14 @@ package reporters
 
 import (
 	"strconv"
-	"strings"
 
 	anaConsts "github.com/ActiveState/cli/internal/analytics/constants"
 	"github.com/ActiveState/cli/internal/analytics/dimensions"
+	"github.com/ActiveState/cli/internal/condition"
 	"github.com/ActiveState/cli/internal/constants"
 	"github.com/ActiveState/cli/internal/errs"
 	"github.com/ActiveState/cli/internal/logging"
-	"github.com/ActiveState/cli/internal/rtutils/p"
+	"github.com/ActiveState/cli/internal/rtutils/ptr"
 	ga "github.com/ActiveState/go-ogle-analytics"
 )
 
@@ -44,7 +44,7 @@ func (r *GaCLIReporter) AddOmitCategory(category string) {
 	r.omit[category] = struct{}{}
 }
 
-func (r *GaCLIReporter) Event(category, action, label string, d *dimensions.Values) error {
+func (r *GaCLIReporter) Event(category, action, source, label string, d *dimensions.Values) error {
 	if _, ok := r.omit[category]; ok {
 		logging.Debug("Not sending event with category: %s to Google Analytics", category)
 		return nil
@@ -53,7 +53,9 @@ func (r *GaCLIReporter) Event(category, action, label string, d *dimensions.Valu
 	r.ga.CustomDimensionMap(legacyDimensionMap(d))
 
 	if category == anaConsts.CatRunCmd {
-		r.ga.Send(ga.NewPageview())
+		if err := r.ga.Send(ga.NewPageview()); err != nil {
+			return errs.Wrap(err, "Could not send GA Pageview")
+		}
 	}
 	event := ga.NewEvent(category, action)
 	if label != "" {
@@ -61,7 +63,7 @@ func (r *GaCLIReporter) Event(category, action, label string, d *dimensions.Valu
 	}
 	err := r.ga.Send(event)
 	if err != nil {
-		if strings.Contains(err.Error(), "no such host") || strings.Contains(err.Error(), "no route to host") {
+		if condition.IsNetworkingError(err) {
 			logging.Debug("Cannot send Google Analytics event as the hostname appears to be blocked. Error received: %s", err.Error())
 			return nil
 		}
@@ -75,24 +77,30 @@ func legacyDimensionMap(d *dimensions.Values) map[string]string {
 	return map[string]string{
 		// Commented out idx 1 so it's clear why we start with 2. We used to log the hostname while dogfooding internally.
 		// "1": "hostname (deprecated)"
-		"2": p.PStr(d.Version),
-		"3": p.PStr(d.BranchName),
-		"4": p.PStr(d.UserID),
-		"5": p.PStr(d.OutputType),
-		"6": p.PStr(d.OSName),
-		"7": p.PStr(d.OSVersion),
-		"8": p.PStr(d.InstallSource),
+		"2": ptr.From(d.Version, ""),
+		"3": ptr.From(d.ChannelName, ""),
+		"4": ptr.From(d.UserID, ""),
+		"5": ptr.From(d.OutputType, ""),
+		"6": ptr.From(d.OSName, ""),
+		"7": ptr.From(d.OSVersion, ""),
+		"8": ptr.From(d.InstallSource, ""),
 		// "9":  "machineID (deprecated in favor of uniqID)"
-		"10": p.PStr(d.ProjectNameSpace),
-		"11": p.PStr(d.SessionToken),
-		"12": p.PStr(d.UniqID),
-		"13": p.PStr(d.UpdateTag),
-		"14": p.PStr(d.ProjectID),
-		"16": p.PStr(d.Trigger),
-		"17": p.PStr(d.InstanceID),
-		"18": p.PStr(d.Headless),
-		"19": p.PStr(d.CommitID),
-		"20": p.PStr(d.Command),
-		"21": strconv.Itoa(p.PInt(d.Sequence)),
+		"10": ptr.From(d.ProjectNameSpace, ""),
+		"11": ptr.From(d.SessionToken, ""),
+		"12": ptr.From(d.UniqID, ""),
+		"13": ptr.From(d.UpdateTag, ""),
+		"14": ptr.From(d.ProjectID, ""),
+		"16": ptr.From(d.Trigger, ""),
+		"17": ptr.From(d.InstanceID, ""),
+		"18": ptr.From(d.Headless, ""),
+		"19": ptr.From(d.CommitID, ""),
+		"20": ptr.From(d.Command, ""),
+		"21": strconv.Itoa(ptr.From(d.Sequence, -1)),
+		"22": strconv.FormatBool(ptr.From(d.CI, false)),
+		"23": strconv.FormatBool(ptr.From(d.Interactive, false)),
+		"24": ptr.From(d.TargetVersion, ""),
+		"25": ptr.From(d.Error, ""),
+		"26": ptr.From(d.Message, ""),
+		"27": strconv.FormatBool(ptr.From(d.ActiveStateCI, false)),
 	}
 }

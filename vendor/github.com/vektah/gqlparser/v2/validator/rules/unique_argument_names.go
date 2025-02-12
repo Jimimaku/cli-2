@@ -2,6 +2,8 @@ package validator
 
 import (
 	"github.com/vektah/gqlparser/v2/ast"
+
+	//nolint:revive // Validator rules each use dot imports for convenience.
 	. "github.com/vektah/gqlparser/v2/validator"
 )
 
@@ -18,16 +20,16 @@ func init() {
 }
 
 func checkUniqueArgs(args ast.ArgumentList, addError AddErrFunc) {
-	knownArgNames := map[string]bool{}
+	knownArgNames := map[string]int{}
 
 	for _, arg := range args {
-		if knownArgNames[arg.Name] {
+		if knownArgNames[arg.Name] == 1 {
 			addError(
 				Message(`There can be only one argument named "%s".`, arg.Name),
 				At(arg.Position),
 			)
 		}
 
-		knownArgNames[arg.Name] = true
+		knownArgNames[arg.Name]++
 	}
 }

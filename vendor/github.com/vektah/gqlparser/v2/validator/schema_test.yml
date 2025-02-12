@@ -61,7 +61,7 @@ object types:
         b: Int
       }
     error:
-      message: 'OBJECT must define one or more fields.'
+      message: 'OBJECT InvalidObject2: must define one or more fields.'
       locations: [{line: 6, column: 6}]
   - name: check reserved names on type name
     input: |
@@ -80,6 +80,15 @@ object types:
       message: 'Name "__id" must not begin with "__", which is reserved by GraphQL introspection.'
       locations: [{line: 2, column: 3}]
 
+  - name: field argument list must not be empty
+    input: |
+      type FooBar {
+        foo(): ID
+      }
+    error:
+      message: 'expected at least one definition, found )'
+      locations: [{line: 2, column: 7}]
+
   - name: check reserved names on type field argument
     input: |
       type FooBar {
@@ -89,7 +98,7 @@ object types:
       message: 'Name "__bar" must not begin with "__", which is reserved by GraphQL introspection.'
       locations: [{line: 2, column: 7}]
 
-  - name: must not allow input object as field type 
+  - name: must not allow input object as field type
     input: |
       input Input {
         id: ID
@@ -98,7 +107,7 @@ object types:
         input: Input!
       }
     error:
-      message: 'OBJECT field must be one of SCALAR, OBJECT, INTERFACE, UNION, ENUM.'
+      message: 'OBJECT Query: field must be one of SCALAR, OBJECT, INTERFACE, UNION, ENUM.'
       locations: [{line: 5, column: 3}]
 
 interfaces:
@@ -149,8 +158,9 @@ interfaces:
         b: Int
       }
     error:
-      message: 'INTERFACE must define one or more fields.'
+      message: 'INTERFACE InvalidInterface2: must define one or more fields.'
       locations: [{line: 6, column: 11}]
+
   - name: check reserved names on type name
     input: |
       interface __FooBar {
@@ -160,7 +170,7 @@ interfaces:
       message: 'Name "__FooBar" must not begin with "__", which is reserved by GraphQL introspection.'
       locations: [{line: 1, column: 11}]
 
-  - name: must not allow input object as field type 
+  - name: must not allow input object as field type
     input: |
       input Input {
         id: ID
@@ -172,7 +182,7 @@ interfaces:
         input: Input!
       }
     error:
-      message: 'INTERFACE field must be one of SCALAR, OBJECT, INTERFACE, UNION, ENUM.'
+      message: 'INTERFACE Foo: field must be one of SCALAR, OBJECT, INTERFACE, UNION, ENUM.'
       locations: [{line: 8, column: 3}]
 
   - name: must have all fields from interface
@@ -275,6 +285,53 @@ interfaces:
           f: U!
       }
 
+  - name: may define intermediate interfaces
+    input: |
+      interface IA {
+          id: ID!
+      }
+
+      interface IIA implements IA {
+          id: ID!
+      }
+
+      type A implements IIA & IA {
+          id: ID!
+      }
+
+  - name: Type Foo must implement Baz because it is implemented by Bar
+    input: |
+      interface Baz {
+          baz: String
+      }
+
+      interface Bar implements Baz {
+          bar: String
+          baz: String
+      }
+
+      type Foo implements Bar {
+          foo: String
+          bar: String
+          baz: String
+      }
+    error:
+      message: 'Type Foo must implement Baz because it is implemented by Bar.'
+      locations: [{line: 10, column: 6}]
+
+  - name: circular reference error
+    input: |
+      interface Circular1 implements Circular2 {
+        id: ID!
+      }
+
+      interface Circular2 implements Circular1 {
+        id: ID!
+      }
+    error:
+      message: 'Type Circular1 cannot implement Circular2 because it would create a circular reference.'
+      locations: [{line: 1, column: 11}]
+
 inputs:
   - name: must define one or more input fields
     input: |
@@ -293,7 +350,7 @@ inputs:
         b: Int
       }
     error:
-      message: 'INPUT_OBJECT must define one or more input fields.'
+      message: 'INPUT_OBJECT InvalidInput2: must define one or more input fields.'
       locations: [{line: 6, column: 7}]
   - name: check reserved names on type name
     input: |
@@ -309,7 +366,7 @@ inputs:
       type Object { id: ID }
       input Foo { a: Object! }
     error:
-      message: INPUT_OBJECT field must be one of SCALAR, ENUM, INPUT_OBJECT.
+      message: 'OBJECT a: field must be one of SCALAR, ENUM, INPUT_OBJECT.'
       locations: [{line: 2, column: 13}]
 
   - name: fields cannot be Interfaces
@@ -317,7 +374,7 @@ inputs:
       interface Interface { id: ID! }
       input Foo { a: Interface! }
     error:
-      message: INPUT_OBJECT field must be one of SCALAR, ENUM, INPUT_OBJECT.
+      message: 'INTERFACE a: field must be one of SCALAR, ENUM, INPUT_OBJECT.'
       locations: [{line: 2, column: 13}]
 
   - name: fields cannot be Unions
@@ -326,7 +383,7 @@ inputs:
       union Union = Object
       input Foo { a: Union! }
     error:
-      message: INPUT_OBJECT field must be one of SCALAR, ENUM, INPUT_OBJECT.
+      message: 'UNION a: field must be one of SCALAR, ENUM, INPUT_OBJECT.'
       locations: [{line: 3, column: 13}]
 
 args:
@@ -386,7 +443,7 @@ enums:
         BAR
       }
     error:
-      message: 'ENUM must define one or more unique enum values.'
+      message: 'ENUM InvalidEnum2: must define one or more unique enum values.'
       locations: [{line: 6, column: 6}]
   - name: check reserved names on type name
     input: |
@@ -475,7 +532,21 @@ directives:
       message: "Cannot redeclare directive A."
       locations: [{line: 2, column: 12}]
 
-  - name: must be declared
+  - name: can redeclare builtin directives
+    input: |
+      directive @skip(if: Boolean!) on FIELD | FRAGMENT_SPREAD | INLINE_FRAGMENT
+      directive @skip(if: Boolean!) on FIELD | FRAGMENT_SPREAD | INLINE_FRAGMENT
+
+  - name: must be declared (type)
+    input: |
+      type User @foo {
+        name: String
+      }
+    error:
+      message: "Undefined directive foo."
+      locations: [{line: 1, column: 12}]
+
+  - name: must be declared (field)
     input: |
       type User {
         name: String @foo
@@ -483,6 +554,15 @@ directives:
     error:
       message: "Undefined directive foo."
       locations: [{line: 2, column: 17}]
+
+  - name: must be declared (enum)
+    input: |
+      enum Unit {
+        METER @foo
+      }
+    error:
+      message: "Undefined directive foo."
+      locations: [{line: 2, column: 10}]
 
   - name: cannot be self-referential
     input: |
@@ -532,6 +612,51 @@ directives:
     error:
       message: 'cannot use Interface as argument a because INTERFACE is not a valid input type'
       locations: [{line: 2, column: 14}]
+
+  - name: Invalid location usage not allowed
+    input: |
+      directive @test on FIELD_DEFINITION
+      input I1 @test { f: String }
+
+    error:
+      message: 'Directive test is not applicable on INPUT_OBJECT.'
+      locations: [{line: 2, column: 11}]
+
+  - name: Valid location usage
+    input: |
+      directive @testInputField on INPUT_FIELD_DEFINITION
+      directive @testField on FIELD_DEFINITION
+      directive @inp on INPUT_OBJECT
+      input I1 @inp { f: String @testInputField }
+      type P { name: String @testField }
+      interface I { id: ID @testField }
+
+  - name: Invalid directive argument not allowed
+    input: |
+      directive @foo(bla: Int!) on FIELD_DEFINITION
+      type P {f: Int @foo(foobla: 11)}
+    
+    error:
+      message: 'Undefined argument foobla for directive foo.'
+      locations: [{line: 2, column: 21}]
+
+  - name: non-null argument must be provided
+    input: |
+      directive @foo(bla: Int!) on FIELD_DEFINITION
+      type P {f: Int @foo }
+    
+    error:
+      message: 'Argument bla for directive foo cannot be null.'
+      locations: [{line: 2, column: 17}]
+
+  - name: non-null argument must not be null
+    input: |
+      directive @foo(bla: Int!) on FIELD_DEFINITION
+      type P {f: Int @foo(bla: null) }
+    
+    error:
+      message: 'Argument bla for directive foo cannot be null.'
+      locations: [{line: 2, column: 17}]
 
 entry points:
   - name: multiple schema entry points
@@ -596,3 +721,11 @@ type references:
     error:
       message: "Undefined type FooBar."
       locations: [{line: 1, column: 21}]
+
+  - name: Invalid enum value
+    input: |
+      enum Enum { true }
+
+    error:
+      message: "ENUM Enum: non-enum value true."
+      locations: [{line: 1, column: 6}]

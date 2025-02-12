@@ -2,6 +2,12 @@
 
 package graph
 
+import (
+	"fmt"
+	"io"
+	"strconv"
+)
+
 type AnalyticsEventResponse struct {
 	Sent bool `json:"sent"`
 }
@@ -18,11 +24,44 @@ type ConfigChangedResponse struct {
 	Received bool `json:"received"`
 }
 
-type DeprecationInfo struct {
-	Version     string `json:"version"`
-	Date        string `json:"date"`
-	DateReached bool   `json:"dateReached"`
-	Reason      string `json:"reason"`
+type GlobFileResult struct {
+	Pattern string `json:"pattern"`
+	Path    string `json:"path"`
+	Hash    string `json:"hash"`
+}
+
+type GlobResult struct {
+	Files []*GlobFileResult `json:"files"`
+	Hash  string            `json:"hash"`
+}
+
+type Jwt struct {
+	Token string `json:"token"`
+	User  *User  `json:"user"`
+}
+
+type Mutation struct {
+}
+
+type NotificationInfo struct {
+	ID        string                    `json:"id"`
+	Message   string                    `json:"message"`
+	Condition string                    `json:"condition"`
+	StartDate string                    `json:"startDate"`
+	EndDate   string                    `json:"endDate"`
+	Repeat    NotificationRepeatType    `json:"repeat"`
+	Interrupt NotificationInterruptType `json:"interrupt"`
+	Placement NotificationPlacementType `json:"placement"`
+}
+
+type Organization struct {
+	URLname string `json:"URLname"`
+	Role    string `json:"role"`
+}
+
+type ProcessInfo struct {
+	Exe string `json:"exe"`
+	Pid int    `json:"pid"`
 }
 
 type Project struct {
@@ -30,18 +69,161 @@ type Project struct {
 	Locations []string `json:"locations"`
 }
 
-type RuntimeUsageResponse struct {
+type Query struct {
+}
+
+type ReportRuntimeUsageResponse struct {
 	Received bool `json:"received"`
 }
 
 type StateVersion struct {
 	License  string `json:"license"`
 	Version  string `json:"version"`
-	Branch   string `json:"branch"`
+	Channel  string `json:"channel"`
 	Revision string `json:"revision"`
 	Date     string `json:"date"`
 }
 
+type User struct {
+	UserID        string          `json:"userID"`
+	Username      string          `json:"username"`
+	Email         string          `json:"email"`
+	Organizations []*Organization `json:"organizations"`
+}
+
 type Version struct {
 	State *StateVersion `json:"state"`
+}
+
+type NotificationInterruptType string
+
+const (
+	NotificationInterruptTypeDisabled NotificationInterruptType = "Disabled"
+	NotificationInterruptTypePrompt   NotificationInterruptType = "Prompt"
+	NotificationInterruptTypeExit     NotificationInterruptType = "Exit"
+)
+
+var AllNotificationInterruptType = []NotificationInterruptType{
+	NotificationInterruptTypeDisabled,
+	NotificationInterruptTypePrompt,
+	NotificationInterruptTypeExit,
+}
+
+func (e NotificationInterruptType) IsValid() bool {
+	switch e {
+	case NotificationInterruptTypeDisabled, NotificationInterruptTypePrompt, NotificationInterruptTypeExit:
+		return true
+	}
+	return false
+}
+
+func (e NotificationInterruptType) String() string {
+	return string(e)
+}
+
+func (e *NotificationInterruptType) UnmarshalGQL(v interface{}) error {
+	str, ok := v.(string)
+	if !ok {
+		return fmt.Errorf("enums must be strings")
+	}
+
+	*e = NotificationInterruptType(str)
+	if !e.IsValid() {
+		return fmt.Errorf("%s is not a valid NotificationInterruptType", str)
+	}
+	return nil
+}
+
+func (e NotificationInterruptType) MarshalGQL(w io.Writer) {
+	fmt.Fprint(w, strconv.Quote(e.String()))
+}
+
+type NotificationPlacementType string
+
+const (
+	NotificationPlacementTypeBeforeCmd NotificationPlacementType = "BeforeCmd"
+	NotificationPlacementTypeAfterCmd  NotificationPlacementType = "AfterCmd"
+)
+
+var AllNotificationPlacementType = []NotificationPlacementType{
+	NotificationPlacementTypeBeforeCmd,
+	NotificationPlacementTypeAfterCmd,
+}
+
+func (e NotificationPlacementType) IsValid() bool {
+	switch e {
+	case NotificationPlacementTypeBeforeCmd, NotificationPlacementTypeAfterCmd:
+		return true
+	}
+	return false
+}
+
+func (e NotificationPlacementType) String() string {
+	return string(e)
+}
+
+func (e *NotificationPlacementType) UnmarshalGQL(v interface{}) error {
+	str, ok := v.(string)
+	if !ok {
+		return fmt.Errorf("enums must be strings")
+	}
+
+	*e = NotificationPlacementType(str)
+	if !e.IsValid() {
+		return fmt.Errorf("%s is not a valid NotificationPlacementType", str)
+	}
+	return nil
+}
+
+func (e NotificationPlacementType) MarshalGQL(w io.Writer) {
+	fmt.Fprint(w, strconv.Quote(e.String()))
+}
+
+type NotificationRepeatType string
+
+const (
+	NotificationRepeatTypeDisabled   NotificationRepeatType = "Disabled"
+	NotificationRepeatTypeConstantly NotificationRepeatType = "Constantly"
+	NotificationRepeatTypeHourly     NotificationRepeatType = "Hourly"
+	NotificationRepeatTypeDaily      NotificationRepeatType = "Daily"
+	NotificationRepeatTypeWeekly     NotificationRepeatType = "Weekly"
+	NotificationRepeatTypeMonthly    NotificationRepeatType = "Monthly"
+)
+
+var AllNotificationRepeatType = []NotificationRepeatType{
+	NotificationRepeatTypeDisabled,
+	NotificationRepeatTypeConstantly,
+	NotificationRepeatTypeHourly,
+	NotificationRepeatTypeDaily,
+	NotificationRepeatTypeWeekly,
+	NotificationRepeatTypeMonthly,
+}
+
+func (e NotificationRepeatType) IsValid() bool {
+	switch e {
+	case NotificationRepeatTypeDisabled, NotificationRepeatTypeConstantly, NotificationRepeatTypeHourly, NotificationRepeatTypeDaily, NotificationRepeatTypeWeekly, NotificationRepeatTypeMonthly:
+		return true
+	}
+	return false
+}
+
+func (e NotificationRepeatType) String() string {
+	return string(e)
+}
+
+func (e *NotificationRepeatType) UnmarshalGQL(v interface{}) error {
+	str, ok := v.(string)
+	if !ok {
+		return fmt.Errorf("enums must be strings")
+	}
+
+	*e = NotificationRepeatType(str)
+	if !e.IsValid() {
+		return fmt.Errorf("%s is not a valid NotificationRepeatType", str)
+	}
+	return nil
+}
+
+func (e NotificationRepeatType) MarshalGQL(w io.Writer) {
+	fmt.Fprint(w, strconv.Quote(e.String()))
 }

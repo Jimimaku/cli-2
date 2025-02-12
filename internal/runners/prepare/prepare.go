@@ -1,19 +1,21 @@
 package prepare
 
 import (
+	"errors"
 	"fmt"
+	"os"
 	"runtime"
 
+	svcApp "github.com/ActiveState/cli/cmd/state-svc/app"
 	svcAutostart "github.com/ActiveState/cli/cmd/state-svc/autostart"
-	trayAutostart "github.com/ActiveState/cli/cmd/state-tray/autostart"
 	"github.com/ActiveState/cli/internal/analytics"
 	"github.com/ActiveState/cli/internal/captain"
 	"github.com/ActiveState/cli/internal/config"
 	"github.com/ActiveState/cli/internal/constants"
 	"github.com/ActiveState/cli/internal/errs"
+	"github.com/ActiveState/cli/internal/fileutils"
 	"github.com/ActiveState/cli/internal/globaldefault"
 	"github.com/ActiveState/cli/internal/installation"
-	"github.com/ActiveState/cli/internal/installation/storage"
 	"github.com/ActiveState/cli/internal/locale"
 	"github.com/ActiveState/cli/internal/logging"
 	"github.com/ActiveState/cli/internal/multilog"
@@ -22,9 +24,8 @@ import (
 	"github.com/ActiveState/cli/internal/primer"
 	"github.com/ActiveState/cli/internal/subshell"
 	"github.com/ActiveState/cli/pkg/platform/model"
-	rt "github.com/ActiveState/cli/pkg/platform/runtime"
-	"github.com/ActiveState/cli/pkg/platform/runtime/target"
 	"github.com/ActiveState/cli/pkg/project"
+	"github.com/ActiveState/cli/pkg/runtime_helpers"
 	"github.com/thoas/go-funk"
 )
 
@@ -61,27 +62,31 @@ func New(prime primeable) *Prepare {
 // This ensures that the installation is compatible with an updated State Tool installation
 func (r *Prepare) resetExecutors() error {
 	defaultProjectDir := r.cfg.GetString(constants.GlobalDefaultPrefname)
-	if defaultProjectDir == "" {
+	if defaultProjectDir == "" || !fileutils.TargetExists(defaultProjectDir) {
 		return nil
 	}
 
 	logging.Debug("Reset default project at %s", defaultProjectDir)
-	defaultTargetDir := target.ProjectDirToTargetDir(defaultProjectDir, storage.CachePath())
-
 	proj, err := project.FromPath(defaultProjectDir)
 	if err != nil {
 		return errs.Wrap(err, "Could not get project from its directory")
 	}
 
-	run, err := rt.New(target.NewCustomTarget(proj.Owner(), proj.Name(), proj.CommitUUID(), defaultTargetDir, target.TriggerResetExec, proj.IsHeadless()), r.analytics, r.svcModel)
+	rt, err := runtime_helpers.FromProject(proj)
 	if err != nil {
-		if rt.IsNeedsUpdateError(err) {
-			return nil // project was never set up, so no executors to reset
-		}
 		return errs.Wrap(err, "Could not initialize runtime for project.")
 	}
 
-	if err := globaldefault.SetupDefaultActivation(r.subshell, r.cfg, run, proj); err != nil {
+	rtHash, err := runtime_helpers.Hash(proj, nil)
+	if err != nil {
+		return errs.Wrap(err, "Could not get runtime hash")
+	}
+
+	if rtHash == rt.Hash() || !rt.HasCache() {
+		return nil
+	}
+
+	if err := globaldefault.SetupDefaultActivation(r.subshell, r.cfg, rt, proj); err != nil {
 		return errs.Wrap(err, "Failed to rewrite the executors.")
 	}
 
@@ -101,32 +106,36 @@ func (r *Prepare) Run(cmd *captain.Command) error {
 	}
 
 	if err := prepareCompletions(cmd, r.subshell); err != nil {
-		if !errs.Matches(err, &ErrorNotSupported{}) {
-			r.reportError(locale.Tl("err_prepare_generate_completions", "Could not generate completions script, error received: {{.V0}}.", err.Error()), err)
+		var errNotSupported *ErrorNotSupported
+		if !errors.As(err, &errNotSupported) && !os.IsPermission(err) {
+			r.reportError(locale.Tl("err_prepare_generate_completions", "Could not generate completions script. Error received: {{.V0}}.", err.Error()), err)
 		}
 	}
 
 	logging.Debug("Reset global executors")
 	if err := r.resetExecutors(); err != nil {
-		r.reportError(locale.Tl("err_reset_executor", "Could not reset global executors, error received: {{.V0}}", errs.JoinMessage(err)), err)
+		r.reportError(locale.Tl("err_reset_executor", "Could not reset global executors. Error received: {{.V0}}", errs.JoinMessage(err)), err)
 	}
 
 	// OS specific preparations
 	err := r.prepareOS()
 	if err != nil {
+		if installation.IsStateExeDoesNotExistError(err) && runtime.GOOS == "windows" {
+			return locale.WrapExternalError(err, "err_install_state_exe_does_not_exist", "", constants.ForumsURL)
+		}
 		return errs.Wrap(err, "Could not prepare OS")
 	}
 
 	if err := updateConfigKey(r.cfg, oldGlobalDefaultPrefname, constants.GlobalDefaultPrefname); err != nil {
-		r.reportError(locale.Tl("err_prepare_config", "Could not update stale config keys, error recieved: {{.V0}}", errs.JoinMessage(err)), err)
+		r.reportError(locale.Tl("err_prepare_config", "Could not update stale config keys. Error recieved: {{.V0}}", errs.JoinMessage(err)), err)
 	}
 
 	return nil
 }
 
 func (r *Prepare) reportError(message string, err error) {
-	multilog.Error("prepare error, message: %s, error: %v", message, errs.Join(err, ": "))
-	r.out.Notice(output.Heading(locale.Tl("warning", "Warning")))
+	multilog.Error("prepare error, message: %s, error: %v", message, errs.JoinMessage(err))
+	r.out.Notice(output.Title(locale.Tl("warning", "Warning")))
 	r.out.Notice(message)
 }
 
@@ -154,53 +163,26 @@ func updateConfigKey(cfg *config.Instance, oldKey, newKey string) error {
 }
 
 // InstalledPreparedFiles returns the files installed by state _prepare
-func InstalledPreparedFiles(cfg autostart.Configurable) ([]string, error) {
+func InstalledPreparedFiles() ([]string, error) {
 	var files []string
-	trayExec, err := installation.TrayExec()
-	if err != nil {
-		return nil, locale.WrapError(err, "err_tray_exec")
-	}
-
-	trayShortcut, err := autostart.New(trayAutostart.App, trayExec, nil, trayAutostart.Options, cfg)
+	svcApp, err := svcApp.New()
 	if err != nil {
 		return nil, locale.WrapError(err, "err_autostart_app")
 	}
 
-	path, err := trayShortcut.InstallPath()
+	path, err := autostart.AutostartPath(svcApp.Path(), svcAutostart.Options)
 	if err != nil {
 		multilog.Error("Failed to determine shortcut path for removal: %v", err)
 	} else if path != "" {
 		files = append(files, path)
 	}
 
-	svcExec, err := installation.ServiceExec()
-	if err != nil {
-		return nil, locale.WrapError(err, "err_svc_exec")
-	}
-
-	svcShortcut, err := autostart.New(svcAutostart.App, svcExec, []string{"start"}, svcAutostart.Options, cfg)
-	if err != nil {
-		return nil, locale.WrapError(err, "err_autostart_app")
-	}
-
-	path, err = svcShortcut.InstallPath()
-	if err != nil {
-		multilog.Error("Failed to determine shortcut path for removal: %v", err)
-	} else if path != "" {
-		files = append(files, path)
-	}
-
-	osSpecificFiles, err := installedPreparedFiles(cfg)
-	if err != nil {
-		return nil, locale.WrapError(err, "err_prepare_os_files", "Could not get list of OS specific prepared files")
-	}
-
-	files = append(files, osSpecificFiles...)
+	files = append(files, extraInstalledPreparedFiles()...)
 
 	return files, nil
 }
 
 // CleanOS performs any OS-specific cleanup that is needed other than deleting installed files.
-func CleanOS(cfg autostart.Configurable) error {
-	return cleanOS(cfg)
+func CleanOS() error {
+	return cleanOS()
 }

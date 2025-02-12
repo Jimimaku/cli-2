@@ -8,26 +8,40 @@ import (
 	"github.com/ActiveState/cli/internal/analytics"
 	"github.com/ActiveState/cli/internal/config"
 	"github.com/ActiveState/cli/internal/errs"
-	"github.com/ActiveState/cli/internal/exeutils"
-	"github.com/ActiveState/cli/internal/installation/storage"
 	"github.com/ActiveState/cli/internal/language"
 	"github.com/ActiveState/cli/internal/locale"
 	"github.com/ActiveState/cli/internal/logging"
+	"github.com/ActiveState/cli/internal/osutils"
 	"github.com/ActiveState/cli/internal/output"
+	"github.com/ActiveState/cli/internal/primer"
 	"github.com/ActiveState/cli/internal/process"
-	"github.com/ActiveState/cli/internal/runbits"
+	"github.com/ActiveState/cli/internal/runbits/runtime"
+	"github.com/ActiveState/cli/internal/runbits/runtime/trigger"
 	"github.com/ActiveState/cli/internal/scriptfile"
 	"github.com/ActiveState/cli/internal/subshell"
 	"github.com/ActiveState/cli/internal/virtualenvironment"
 	"github.com/ActiveState/cli/pkg/platform/authentication"
 	"github.com/ActiveState/cli/pkg/platform/model"
-	"github.com/ActiveState/cli/pkg/platform/runtime"
-	"github.com/ActiveState/cli/pkg/platform/runtime/target"
 	"github.com/ActiveState/cli/pkg/project"
 )
 
+type primeable interface {
+	primer.Auther
+	primer.Outputer
+	primer.Projecter
+	primer.Subsheller
+	primer.Configurer
+	primer.Analyticer
+	primer.SvcModeler
+}
+
 // ScriptRun manages the context required to run a script.
 type ScriptRun struct {
+	prime primeable
+	// The remainder is redundant with the above. Refactoring this will follow in a later story so as not to blow
+	// up the one that necessitates adding the primer at this level.
+	// https://activestatef.atlassian.net/browse/DX-2869
+
 	auth      *authentication.Auth
 	out       output.Outputer
 	sub       subshell.SubShell
@@ -41,15 +55,16 @@ type ScriptRun struct {
 }
 
 // New returns a pointer to a prepared instance of ScriptRun.
-func New(auth *authentication.Auth, out output.Outputer, subs subshell.SubShell, proj *project.Project, cfg *config.Instance, analytics analytics.Dispatcher, svcModel *model.SvcModel) *ScriptRun {
+func New(prime primeable) *ScriptRun {
 	return &ScriptRun{
-		auth,
-		out,
-		subs,
-		proj,
-		cfg,
-		analytics,
-		svcModel,
+		prime,
+		prime.Auth(),
+		prime.Output(),
+		prime.Subshell(),
+		prime.Project(),
+		prime.Config(),
+		prime.Analytics(),
+		prime.SvcModel(),
 
 		false,
 
@@ -66,24 +81,16 @@ func (s *ScriptRun) NeedsActivation() bool {
 }
 
 // PrepareVirtualEnv sets up the relevant runtime and prepares the environment.
-func (s *ScriptRun) PrepareVirtualEnv() error {
-	rt, err := runtime.New(target.NewProjectTarget(s.project, storage.CachePath(), nil, target.TriggerScript), s.analytics, s.svcModel)
+func (s *ScriptRun) PrepareVirtualEnv() (rerr error) {
+	rt, err := runtime_runbit.Update(s.prime, trigger.TriggerScript, runtime_runbit.WithoutHeaders())
 	if err != nil {
-		if !runtime.IsNeedsUpdateError(err) {
-			return locale.WrapError(err, "err_activate_runtime", "Could not initialize a runtime for this project.")
-		}
-		eh, err := runbits.DefaultRuntimeEventHandler(s.out)
-		if err != nil {
-			return locale.WrapError(err, "err_initialize_runtime_event_handler")
-		}
-		if err := rt.Update(s.auth, eh); err != nil {
-			return locale.WrapError(err, "err_update_runtime", "Could not update runtime installation.")
-		}
+		return locale.WrapError(err, "err_activate_runtime", "Could not initialize a runtime for this project.")
 	}
+
 	venv := virtualenvironment.New(rt)
 
 	projDir := filepath.Dir(s.project.Source().Path())
-	env, err := venv.GetEnv(true, true, projDir)
+	env, err := venv.GetEnv(true, true, projDir, s.project.Namespace().String())
 	if err != nil {
 		return errs.Wrap(err, "Could not get venv environment")
 	}
@@ -93,7 +100,7 @@ func (s *ScriptRun) PrepareVirtualEnv() error {
 	}
 
 	// search the "clean" path first (PATHS that are set by venv)
-	env, err = venv.GetEnv(false, true, "")
+	env, err = venv.GetEnv(false, true, "", "")
 	if err != nil {
 		return errs.Wrap(err, "Could not get venv environment")
 	}
@@ -188,18 +195,18 @@ func (s *ScriptRun) Run(script *project.Script, args []string) error {
 			err = locale.WrapInputError(
 				err,
 				"err_run_script",
-				"Script execution fell back to {{.V0}} after {{.V1}} was not detected in your project or system. Please ensure your script is compatible with one, or more, of: {{.V0}}, {{.V1}}",
+				"Script execution fell back to '{{.V0}}' after '{{.V1}}' was not detected in your project or system. Please ensure your script is compatible with one, or more, of: {{.V0}}, {{.V1}}",
 				lang.String(),
 				strings.Join(attempted, ", "),
 			)
 		}
 		return errs.AddTips(
-			locale.WrapError(err, "err_script_run", "Your script failed to execute: {{.V0}}.", err.Error()),
+			locale.WrapInputError(err, "err_script_run", "Your script failed to execute: {{.V0}}.", err.Error()),
 			locale.Tl("script_run_tip", "Edit the script '[ACTIONABLE]{{.V0}}[/RESET]' in your [ACTIONABLE]activestate.yaml[/RESET].", script.Name()))
 	}
 	return nil
 }
 
 func PathProvidesExec(path, exec string) bool {
-	return exeutils.FindExeInside(exec, path) != ""
+	return osutils.FindExeInside(exec, path) != ""
 }

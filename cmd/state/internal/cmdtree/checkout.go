@@ -5,13 +5,10 @@ import (
 	"github.com/ActiveState/cli/internal/locale"
 	"github.com/ActiveState/cli/internal/primer"
 	"github.com/ActiveState/cli/internal/runners/checkout"
-	"github.com/ActiveState/cli/pkg/project"
 )
 
 func newCheckoutCommand(prime *primer.Values) *captain.Command {
-	params := &checkout.Params{
-		Namespace: &project.Namespaced{AllowOmitOwner: true},
-	}
+	params := &checkout.Params{}
 
 	cmd := captain.NewCommand(
 		"checkout",
@@ -20,17 +17,38 @@ func newCheckoutCommand(prime *primer.Values) *captain.Command {
 		prime,
 		[]*captain.Flag{
 			{
-				Name:        locale.Tl("flag_state_checkout_branch", "branch"),
+				Name:        "branch",
 				Description: locale.Tl("flag_state_checkout_branch_description", "Defines the branch to checkout"),
 				Value:       &params.Branch,
+			},
+			{
+				Name:        "runtime-path",
+				Description: locale.Tl("flag_state_checkout_runtime-path_description", "Path to store the runtime files"),
+				Value:       &params.RuntimePath,
+			},
+			{
+				Name:        "portable",
+				Description: locale.Tl("flag_state_checkout_portable_description", "Copy files to their runtime path instead of linking to them"),
+				Value:       &params.Portable,
+			},
+			{
+				Name:        "no-clone",
+				Description: locale.Tl("flag_state_checkout_no_clone_description", "Do not clone the github repository associated with this project (if any)"),
+				Value:       &params.NoClone,
+			},
+			{
+				Name:        "force",
+				Shorthand:   "f",
+				Description: locale.Tl("flag_state_checkout_force", "Leave a failed project checkout on disk; do not delete it"),
+				Value:       &params.Force,
 			},
 		},
 		[]*captain.Argument{
 			{
-				Name:        locale.Tl("arg_state_checkout_namespace", "org/project"),
-				Description: locale.Tl("arg_state_checkout_namespace_description", "The namespace of the project that you wish to checkout"),
+				Name:        locale.T("arg_state_checkout_namespace"),
+				Description: locale.T("arg_state_checkout_namespace_description"),
+				Value:       &params.Namespace,
 				Required:    true,
-				Value:       params.Namespace,
 			},
 			{
 				Name:        locale.Tl("arg_state_checkout_path", "path"),
@@ -43,6 +61,6 @@ func newCheckoutCommand(prime *primer.Values) *captain.Command {
 		},
 	)
 	cmd.SetGroup(EnvironmentSetupGroup)
-	cmd.SetUnstable(true)
+	cmd.SetSupportsStructuredOutput()
 	return cmd
 }

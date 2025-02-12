@@ -16,7 +16,7 @@ func newUseCommand(prime *primer.Values) *captain.Command {
 	cmd := captain.NewCommand(
 		"use",
 		"",
-		locale.Tl("use_description", "Use the given project runtime"),
+		locale.Tl("use_description", "Use the given project as your default. This configures it globally in all your shells, and makes State Tool default to it if not other project was found."),
 		prime,
 		[]*captain.Flag{},
 		[]*captain.Argument{
@@ -29,12 +29,11 @@ func newUseCommand(prime *primer.Values) *captain.Command {
 		func(_ *captain.Command, _ []string) error {
 			return use.NewUse(prime).Run(params)
 		},
-	).SetGroup(EnvironmentUsageGroup)
-	cmd.SetUnstable(true)
+	).SetGroup(EnvironmentUsageGroup).SetSupportsStructuredOutput()
 	return cmd
 }
 
-func newUseResetCommand(prime *primer.Values, globals *globalOptions) *captain.Command {
+func newUseResetCommand(prime *primer.Values) *captain.Command {
 	params := &use.ResetParams{}
 
 	return captain.NewCommand(
@@ -45,7 +44,6 @@ func newUseResetCommand(prime *primer.Values, globals *globalOptions) *captain.C
 		[]*captain.Flag{},
 		[]*captain.Argument{},
 		func(_ *captain.Command, _ []string) error {
-			params.Force = globals.NonInteractive
 			return use.NewReset(prime).Run(params)
 		},
 	)
@@ -62,7 +60,6 @@ func newUseShowCommand(prime *primer.Values) *captain.Command {
 		func(_ *captain.Command, _ []string) error {
 			return use.NewShow(prime).Run()
 		},
-	)
-	cmd.SetUnstable(true)
+	).SetSupportsStructuredOutput()
 	return cmd
 }

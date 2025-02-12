@@ -2,14 +2,13 @@ package projectfile
 
 import (
 	"fmt"
-	"io/ioutil"
 	"net/url"
+	"os"
 	"regexp"
 	"strings"
 
 	"github.com/ActiveState/cli/internal/errs"
 	"github.com/ActiveState/cli/internal/locale"
-	"github.com/ActiveState/cli/internal/multilog"
 )
 
 var projectFieldRE = regexp.MustCompile(`(?m:^project:["' ]*(https?:\/\/.*?)["' ]*$)`)
@@ -38,38 +37,15 @@ func (p *projectField) String() string {
 }
 
 func (p *projectField) SetNamespace(owner, name string) {
-	wasHeadless := p.isHeadless()
-	pathNodes := p.pathNodes()
 	p.setPath(fmt.Sprintf("%s/%s", owner, name))
-	if wasHeadless && len(pathNodes) == 2 {
-		p.SetCommit(pathNodes[1], false)
-	}
-}
-
-func (p *projectField) SetCommit(commitID string, headless bool) {
-	if headless {
-		p.setPath("/commit/" + commitID)
-		p.unsetQuery("commitID")
-		p.unsetQuery("branch")
-	} else {
-		p.setQuery("commitID", commitID)
-	}
 }
 
 func (p *projectField) SetBranch(branch string) {
-	if p.isHeadless() {
-		multilog.Error("Ignoring SetBranch when project is headless")
-		return
-	}
 	p.setQuery("branch", branch)
 }
 
-func (p *projectField) pathNodes() []string {
-	return strings.Split(strings.Trim(p.url.Path, "/"), "/")
-}
-
-func (p *projectField) isHeadless() bool {
-	return strings.HasPrefix(p.url.Path, "/commit/")
+func (p *projectField) SetLegacyCommitID(commitID string) {
+	p.setQuery("commitID", commitID)
 }
 
 func (p *projectField) setPath(path string) {
@@ -83,20 +59,14 @@ func (p *projectField) setQuery(key, value string) {
 	p.url.RawQuery = q.Encode()
 }
 
-func (p *projectField) unsetQuery(key string) {
-	q := p.url.Query()
-	q.Del(key)
-	p.url.RawQuery = q.Encode()
-}
-
 func (p *projectField) Marshal() string {
 	return p.url.String()
 }
 
 func (p *projectField) Save(path string) error {
-	data, err := ioutil.ReadFile(path)
+	data, err := os.ReadFile(path)
 	if err != nil {
-		return errs.Wrap(err, "ioutil.ReadFile %s failed", path)
+		return errs.Wrap(err, "os.ReadFile %s failed", path)
 	}
 
 	projectValue := p.url.String()
@@ -105,8 +75,8 @@ func (p *projectField) Save(path string) error {
 		return locale.NewInputError("err_set_project")
 	}
 
-	if err := ioutil.WriteFile(path, out, 0664); err != nil {
-		return errs.Wrap(err, "ioutil.WriteFile %s failed", path)
+	if err := os.WriteFile(path, out, 0664); err != nil {
+		return errs.Wrap(err, "os.WriteFile %s failed", path)
 	}
 
 	return nil

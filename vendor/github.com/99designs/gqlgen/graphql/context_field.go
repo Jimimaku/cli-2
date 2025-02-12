@@ -19,17 +19,36 @@ type FieldContext struct {
 	// The name of the type this field belongs to
 	Object string
 	// These are the args after processing, they can be mutated in middleware to change what the resolver will get.
-	Args map[string]interface{}
+	Args map[string]any
 	// The raw field
 	Field CollectedField
 	// The index of array in path.
 	Index *int
 	// The result object of resolver
-	Result interface{}
+	Result any
 	// IsMethod indicates if the resolver is a method
 	IsMethod bool
 	// IsResolver indicates if the field has a user-specified resolver
 	IsResolver bool
+	// Child allows getting a child FieldContext by its field collection description.
+	// Note that, the returned child FieldContext represents the context as it was
+	// before the execution of the field resolver. For example:
+	//
+	//	srv.AroundFields(func(ctx context.Context, next graphql.Resolver) (interface{}, error) {
+	//		fc := graphql.GetFieldContext(ctx)
+	//		op := graphql.GetOperationContext(ctx)
+	//		collected := graphql.CollectFields(opCtx, fc.Field.Selections, []string{"User"})
+	//
+	//		child, err := fc.Child(ctx, collected[0])
+	//		if err != nil {
+	//			return nil, err
+	//		}
+	//		fmt.Println("child context %q with args: %v", child.Field.Name, child.Args)
+	//
+	//		return next(ctx)
+	//	})
+	//
+	Child func(context.Context, CollectedField) (*FieldContext, error)
 }
 
 type FieldStats struct {
@@ -79,7 +98,7 @@ func WithFieldContext(ctx context.Context, rc *FieldContext) context.Context {
 	return context.WithValue(ctx, resolverCtx, rc)
 }
 
-func equalPath(a ast.Path, b ast.Path) bool {
+func equalPath(a, b ast.Path) bool {
 	if len(a) != len(b) {
 		return false
 	}

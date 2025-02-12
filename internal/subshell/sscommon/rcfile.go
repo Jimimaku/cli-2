@@ -10,8 +10,9 @@ import (
 	"strings"
 	"text/template"
 
-	"github.com/ActiveState/cli/internal/installation/storage"
 	"github.com/mash/go-tempfile-suffix"
+
+	"github.com/ActiveState/cli/internal/installation/storage"
 
 	"github.com/ActiveState/cli/internal/assets"
 	"github.com/ActiveState/cli/internal/colorize"
@@ -46,6 +47,11 @@ var (
 		constants.RCAppendOfflineInstallStopLine,
 		"user_offlineinstall_env",
 	}
+	AutostartID RcIdentification = RcIdentification{
+		constants.RCAppendAutostartStartLine,
+		constants.RCAppendAutostartStopLine,
+		"user_autostart_env",
+	}
 )
 
 // Configurable defines an interface to store and get configuration data
@@ -68,9 +74,13 @@ func WriteRcFile(rcTemplateName string, path string, data RcIdentification, env 
 	}
 
 	rcData := map[string]interface{}{
-		"Start": data.Start,
-		"Stop":  data.Stop,
-		"Env":   env,
+		"Start":                 data.Start,
+		"Stop":                  data.Stop,
+		"Env":                   env,
+		"ActivatedEnv":          constants.ActivatedStateEnvVarName,
+		"ConfigFile":            constants.ConfigFileName,
+		"ActivatedNamespaceEnv": constants.ActivatedStateNamespaceEnvVarName,
+		"Default":               data == DefaultID,
 	}
 
 	if err := CleanRcFile(path, data); err != nil {
@@ -92,8 +102,6 @@ func WriteRcFile(rcTemplateName string, path string, data RcIdentification, env 
 		return errs.Wrap(err, "Templating failure")
 	}
 
-	logging.Debug("Writing to %s:\n%s", path, out.String())
-
 	return fileutils.AppendToFile(path, []byte(fileutils.LineEnd+out.String()))
 }
 
@@ -107,7 +115,6 @@ func WriteRcData(data string, path string, identification RcIdentification) erro
 	}
 
 	data = identification.Start + fileutils.LineEnd + data + fileutils.LineEnd + identification.Stop
-	logging.Debug("Writing to %s:\n%s", path, data)
 	return fileutils.AppendToFile(path, []byte(fileutils.LineEnd+data))
 }
 
@@ -186,7 +193,7 @@ func CleanRcFile(path string, data RcIdentification) error {
 }
 
 // SetupShellRcFile create a rc file to activate a runtime (without a project being present)
-func SetupShellRcFile(rcFileName, templateName string, env map[string]string, namespace *project.Namespaced) error {
+func SetupShellRcFile(rcFileName, templateName string, env map[string]string, namespace *project.Namespaced, cfg Configurable) error {
 	tpl, err := assets.ReadFileBytes(fmt.Sprintf("shells/%s", templateName))
 	if err != nil {
 		return errs.Wrap(err, "Failed to read asset")
@@ -217,7 +224,10 @@ func SetupShellRcFile(rcFileName, templateName string, env map[string]string, na
 	}
 	defer f.Close()
 
-	f.WriteString(out.String())
+	_, err = f.WriteString(out.String())
+	if err != nil {
+		return errs.Wrap(err, "Failed to write to output buffer.")
+	}
 
 	err = os.Chmod(rcFileName, 0755)
 	if err != nil {
@@ -268,7 +278,11 @@ func SetupProjectRcFile(prj *project.Project, templateName, ext string, env map[
 	globalBinDir := filepath.Clean(storage.GlobalBinDir())
 
 	// Prepare script map to be parsed by template
-	for _, cmd := range prj.Scripts() {
+	projectScripts, err := prj.Scripts()
+	if err != nil {
+		return nil, errs.Wrap(err, "Could not get project scripts")
+	}
+	for _, cmd := range projectScripts {
 		explicitName = fmt.Sprintf("%s_%s", prj.NormalizedName(), cmd.Name())
 
 		path, err := exec.LookPath(cmd.Name())
@@ -298,15 +312,6 @@ func SetupProjectRcFile(prj *project.Project, templateName, ext string, env map[
 
 	isConsole := ext == ".bat" // yeah this is a dirty cheat, should find something more deterministic
 
-	var activatedMessage string
-	if !prj.IsHeadless() {
-		activatedMessage = locale.Tl("project_activated",
-			"[SUCCESS]✔ Project \"{{.V0}}\" Has Been Activated[/RESET]", prj.Namespace().String())
-	} else {
-		activatedMessage = locale.Tl("headless_project_activated",
-			"[SUCCESS]✔ Virtual Environment Activated[/RESET]")
-	}
-
 	actualEnv := map[string]string{}
 	for k, v := range env {
 		if strings.Contains(v, "\n") {
@@ -317,14 +322,16 @@ func SetupProjectRcFile(prj *project.Project, templateName, ext string, env map[
 	}
 
 	rcData := map[string]interface{}{
-		"Owner":            prj.Owner(),
-		"Name":             prj.Name(),
-		"Env":              actualEnv,
-		"WD":               wd,
-		"UserScripts":      userScripts,
-		"Scripts":          scripts,
-		"ExecName":         constants.CommandName,
-		"ActivatedMessage": colorize.ColorizedOrStrip(activatedMessage, isConsole),
+		"Owner":       prj.Owner(),
+		"Name":        prj.Name(),
+		"Project":     prj.NamespaceString(),
+		"Env":         actualEnv,
+		"WD":          wd,
+		"UserScripts": userScripts,
+		"Scripts":     scripts,
+		"ExecName":    constants.CommandName,
+		"ActivatedMessage": colorize.ColorizedOrStrip(locale.Tl("project_activated",
+			"[SUCCESS]✔ Project \"{{.V0}}\" Has Been Activated[/RESET]", prj.Namespace().String()), isConsole),
 	}
 
 	currExec := osutils.Executable()
@@ -339,13 +346,36 @@ func SetupProjectRcFile(prj *project.Project, templateName, ext string, env map[
 	listSep := string(os.PathListSeparator)
 	pathList, ok := env["PATH"]
 	inPathList, err := fileutils.PathInList(listSep, pathList, currExecAbsDir)
+	if err != nil {
+		return nil, errs.Wrap(err, "Could not check if %s is in PATH", currExecAbsDir)
+	}
 	if !ok || !inPathList {
-		rcData["ExecAlias"] = currExec // alias {ExecName}={ExecAlias}
+		safeExec := currExec
+		if strings.ContainsAny(currExec, " ") {
+			safeExec = fmt.Sprintf(`"%s"`, currExec) // quote for alias
+		}
+		rcData["ExecAlias"] = safeExec // alias {ExecName}={ExecAlias}
 	}
 
 	t := template.New("rcfile")
 	t.Funcs(map[string]interface{}{
 		"splitLines": func(v string) []string { return strings.Split(v, "\n") },
+		"escapePwsh": func(v string) string {
+			// Conver unicode characters
+			result := ""
+			for _, char := range v {
+				if char < 128 {
+					result += string(char)
+				} else {
+					result += fmt.Sprintf("$([char]0x%04x)", char)
+				}
+			}
+
+			// Escape special characters
+			result = strings.ReplaceAll(result, "`", "``")
+			result = strings.ReplaceAll(result, "\"", "`\"")
+			return result
+		},
 	})
 
 	t, err = t.Parse(string(tpl))
@@ -365,9 +395,18 @@ func SetupProjectRcFile(prj *project.Project, templateName, ext string, env map[
 	}
 	defer tmpFile.Close()
 
-	tmpFile.WriteString(o.String())
-
-	logging.Debug("Using project RC: (%s) %s", tmpFile.Name(), o.String())
+	_, err = tmpFile.WriteString(o.String())
+	if err != nil {
+		return nil, errs.Wrap(err, "Failed to write to output buffer.")
+	}
 
 	return tmpFile, nil
+}
+
+func ProjectRCIdentifier(base RcIdentification, namespace *project.Namespaced) RcIdentification {
+	id := base
+	id.Start = fmt.Sprintf("%s-%s", id.Start, namespace.String())
+	id.Stop = fmt.Sprintf("%s-%s", id.Stop, namespace.String())
+	id.Key = fmt.Sprintf("%s_%s", id.Key, namespace.String())
+	return id
 }

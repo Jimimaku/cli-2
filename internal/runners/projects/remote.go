@@ -9,7 +9,6 @@ import (
 	"github.com/ActiveState/cli/internal/locale"
 	"github.com/ActiveState/cli/pkg/platform/api"
 	"github.com/ActiveState/cli/pkg/platform/api/mono/mono_client/organizations"
-	"github.com/ActiveState/cli/pkg/platform/authentication"
 	"github.com/ActiveState/cli/pkg/platform/model"
 	"github.com/ActiveState/cli/pkg/projectfile"
 )
@@ -18,35 +17,38 @@ import (
 func (r *Projects) RunRemote(params *Params) error {
 	projectfile.CleanProjectMapping(r.config)
 
-	projectsList, err := r.fetchProjects(params.Local)
+	if !r.auth.Authenticated() {
+		return locale.NewInputError("err_api_not_authenticated")
+	}
+
+	remoteProjects, err := r.newRemoteProjectsOutput(params.Local)
 	if err != nil {
 		return locale.WrapError(err, "project_err")
 	}
 
-	if len(projectsList) == 0 {
-		r.out.Print(locale.T("project_empty"))
-		return nil
-	}
-
-	r.out.Print(projectsList)
+	r.out.Print(&projectsOutput{remoteProjects})
 	return nil
 }
 
-func (r *Projects) fetchProjects(onlyLocal bool) (projectWithOrgs, error) {
+func (r *Projects) newRemoteProjectsOutput(onlyLocal bool) ([]projectWithOrg, error) {
+	authClient, err := r.auth.Client()
+	if err != nil {
+		return nil, errs.Wrap(err, "Could not get auth client")
+	}
 	orgParams := organizations.NewListOrganizationsParams()
 	memberOnly := true
 	orgParams.SetMemberOnly(&memberOnly)
-	orgs, err := r.auth.Client().Organizations.ListOrganizations(orgParams, authentication.ClientAuth())
+	orgs, err := authClient.Organizations.ListOrganizations(orgParams, r.auth.ClientAuth())
 	if err != nil {
 		if api.ErrorCode(err) == 401 {
 			return nil, locale.NewInputError("err_api_not_authenticated")
 		}
 		return nil, errs.Wrap(err, "Unknown failure")
 	}
-	var projects projectWithOrgs = []projectWithOrg{}
+	var projects []projectWithOrg
 	localConfigProjects := projectfile.GetProjectMapping(r.config)
 	for _, org := range orgs.Payload {
-		platformOrgProjects, err := model.FetchOrganizationProjects(org.URLname)
+		platformOrgProjects, err := model.FetchOrganizationProjects(org.URLname, r.auth)
 		if err != nil {
 			return nil, err
 		}

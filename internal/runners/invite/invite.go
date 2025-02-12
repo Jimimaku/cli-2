@@ -11,6 +11,9 @@ import (
 	"github.com/ActiveState/cli/internal/output"
 	"github.com/ActiveState/cli/internal/primer"
 	"github.com/ActiveState/cli/internal/prompt"
+	"github.com/ActiveState/cli/internal/rtutils/ptr"
+	"github.com/ActiveState/cli/internal/runbits/rationalize"
+	"github.com/ActiveState/cli/pkg/platform/authentication"
 	"github.com/ActiveState/cli/pkg/platform/model"
 	"github.com/ActiveState/cli/pkg/project"
 )
@@ -28,12 +31,14 @@ type invite struct {
 	project *project.Project
 	out     output.Outputer
 	prompt  prompt.Prompter
+	auth    *authentication.Auth
 }
 
 type primeable interface {
 	primer.Projecter
 	primer.Outputer
 	primer.Prompter
+	primer.Auther
 }
 
 func New(prime primeable) *invite {
@@ -41,12 +46,16 @@ func New(prime primeable) *invite {
 		prime.Project(),
 		prime.Output(),
 		prime.Prompt(),
+		prime.Auth(),
 	}
 }
 
 func (i *invite) Run(params *Params, args []string) error {
 	if i.project == nil {
-		return locale.NewInputError("err_no_projectfile", "Must be in a project directory.")
+		return rationalize.ErrNoProject
+	}
+	if !i.auth.Authenticated() {
+		return locale.NewInputError("err_invite_not_logged_in", "You need to authenticate with '[ACTIONABLE]state auth[/RESET]' before you can invite new members.")
 	}
 
 	if len(args) > 1 {
@@ -98,7 +107,7 @@ func (i *invite) Run(params *Params, args []string) error {
 
 func (i *invite) promptForRole() (Role, error) {
 	choices := roleNames()
-	selection, err := i.prompt.Select(locale.Tl("invite_role", "Role"), locale.Tl("invite_select_org_role", "What role should the user(s) be given?"), choices, new(string))
+	selection, err := i.prompt.Select(locale.Tl("invite_role", "Role"), locale.Tl("invite_select_org_role", "What role should the user(s) be given?"), choices, ptr.To(""), nil)
 	if err != nil {
 		return -1, err
 	}
@@ -149,33 +158,14 @@ func (i *invite) send(orgName string, asOwner bool, emails []string) (int, error
 	return len(emails) - errLen, rerr
 }
 
-type outputFormat struct {
-	Email string `locale:"email,Email"`
-	Error error  `locale:"error,Error"`
-}
-
-func (f *outputFormat) MarshalOutput(format output.Format) interface{} {
-	switch format {
-	case output.PlainFormatName:
-		success := locale.Tl("ok", "Ok")
-		if f.Error != nil {
-			success = locale.Tl("err_invite", "Failed: {{.V0}}", f.Error.Error())
-		}
-		return locale.Tl("invite_success", "Sending to {{.V0}} ... {{.V1}}", f.Email, success)
-	}
-
-	return f
-}
-
 func (i *invite) sendSingle(orgName string, asOwner bool, email string) error {
 	// ignore the invitation for now
-	_, err := model.InviteUserToOrg(orgName, asOwner, email)
+	_, err := model.InviteUserToOrg(orgName, asOwner, email, i.auth)
 	if err != nil {
-		i.out.Error(&outputFormat{email, err})
-		return err
+		return locale.WrapError(err, "err_invite", "Failed to send invite to {{.V0}}", email)
 	}
 
-	i.out.Print(&outputFormat{email, nil})
+	i.out.Notice(locale.Tl("invite_success", "Sent invite to {{.V0}}"))
 
 	return nil
 }

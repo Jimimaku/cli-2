@@ -11,9 +11,15 @@ import (
 )
 
 type entry struct {
-	PID  int                `json:"pid"`
-	Exec string             `json:"exec"`
-	Dims *dimensions.Values `json:"dims"`
+	PID    int                `json:"pid"`
+	Exec   string             `json:"exec"`
+	Source string             `json:"source"`
+	Dims   *dimensions.Values `json:"dims"`
+}
+
+// processError wraps an OS-level error, not a State Tool error.
+type processError struct {
+	*errs.WrapperError
 }
 
 func (e entry) IsRunning() (bool, error) {
@@ -22,7 +28,7 @@ func (e entry) IsRunning() (bool, error) {
 	proc, err := process.NewProcess(int32(e.PID))
 	if err != nil {
 		if errors.Is(err, process.ErrorProcessNotRunning) {
-			logging.Debug("Process %d is no longer running", e.PID)
+			logging.Debug("Process %d is no longer running, recieved error: %s", e.PID, err.Error())
 			return false, nil
 		}
 		return false, errs.Wrap(err, "Could not find process: %d", e.PID)
@@ -30,7 +36,7 @@ func (e entry) IsRunning() (bool, error) {
 
 	exe, err := proc.Exe()
 	if err != nil {
-		return false, errs.Wrap(err, "Could not get executable of process: %d", e.PID)
+		return false, &processError{errs.Wrap(err, "Could not get executable of process: %d", e.PID)}
 	}
 
 	match, err := fileutils.PathsMatch(exe, e.Exec)

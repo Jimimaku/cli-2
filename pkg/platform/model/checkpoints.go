@@ -3,6 +3,7 @@ package model
 import (
 	"strings"
 
+	"github.com/ActiveState/cli/pkg/buildscript"
 	"github.com/ActiveState/cli/pkg/platform/api/mono/mono_models"
 	"github.com/go-openapi/strfmt"
 
@@ -16,6 +17,7 @@ import (
 	gqlModel "github.com/ActiveState/cli/pkg/platform/api/graphql/model"
 	"github.com/ActiveState/cli/pkg/platform/api/graphql/request"
 	"github.com/ActiveState/cli/pkg/platform/api/inventory/inventory_models"
+	"github.com/ActiveState/cli/pkg/platform/authentication"
 )
 
 var (
@@ -25,23 +27,23 @@ var (
 // Checkpoint represents a collection of requirements
 type Checkpoint []*mono_models.Checkpoint
 
-// Language represents a langauge requirement
+// Language represents a language requirement
 type Language struct {
 	Name    string `json:"name"`
 	Version string `json:"version"`
 }
 
 // GetRequirement searches a commit for a requirement by name.
-func GetRequirement(commitID strfmt.UUID, namespace, requirement string) (*gqlModel.Requirement, error) {
-	chkPt, _, err := FetchCheckpointForCommit(commitID)
+func GetRequirement(commitID strfmt.UUID, namespace Namespace, requirement string, auth *authentication.Auth) (*gqlModel.Requirement, error) {
+	chkPt, err := FetchCheckpointForCommit(commitID, auth)
 	if err != nil {
 		return nil, err
 	}
 
-	chkPt = FilterCheckpointPackages(chkPt)
+	chkPt = FilterCheckpointNamespace(chkPt, namespace.Type())
 
 	for _, req := range chkPt {
-		if req.Namespace == namespace && req.Requirement == requirement {
+		if req.Namespace == namespace.String() && req.Requirement == requirement {
 			return req, nil
 		}
 	}
@@ -50,8 +52,8 @@ func GetRequirement(commitID strfmt.UUID, namespace, requirement string) (*gqlMo
 }
 
 // FetchLanguagesForCommit fetches a list of language names for the given commit
-func FetchLanguagesForCommit(commitID strfmt.UUID) ([]Language, error) {
-	checkpoint, _, err := FetchCheckpointForCommit(commitID)
+func FetchLanguagesForCommit(commitID strfmt.UUID, auth *authentication.Auth) ([]Language, error) {
+	checkpoint, err := FetchCheckpointForCommit(commitID, auth)
 	if err != nil {
 		return nil, err
 	}
@@ -59,10 +61,33 @@ func FetchLanguagesForCommit(commitID strfmt.UUID) ([]Language, error) {
 	languages := []Language{}
 	for _, requirement := range checkpoint {
 		if NamespaceMatch(requirement.Namespace, NamespaceLanguageMatch) {
-			languages = append(languages, Language{
+			version := MonoConstraintsToString(requirement.VersionConstraints, true)
+			lang := Language{
 				Name:    requirement.Requirement,
-				Version: requirement.VersionConstraint,
-			})
+				Version: version,
+			}
+			languages = append(languages, lang)
+		}
+	}
+
+	return languages, nil
+}
+
+// FetchLanguagesForBuildScript fetches a list of language names for the given buildscript
+func FetchLanguagesForBuildScript(script *buildscript.BuildScript) ([]Language, error) {
+	languages := []Language{}
+	reqs, err := script.DependencyRequirements()
+	if err != nil {
+		return nil, errs.Wrap(err, "failed to get dependency requirements")
+	}
+
+	for _, requirement := range reqs {
+		if NamespaceMatch(requirement.Namespace, NamespaceLanguageMatch) {
+			lang := Language{
+				Name:    requirement.Name,
+				Version: VersionRequirementsToString(requirement.VersionRequirement, true),
+			}
+			languages = append(languages, lang)
 		}
 	}
 
@@ -70,25 +95,42 @@ func FetchLanguagesForCommit(commitID strfmt.UUID) ([]Language, error) {
 }
 
 // FetchCheckpointForCommit fetches the checkpoint for the given commit
-func FetchCheckpointForCommit(commitID strfmt.UUID) ([]*gqlModel.Requirement, strfmt.DateTime, error) {
+func FetchCheckpointForCommit(commitID strfmt.UUID, auth *authentication.Auth) ([]*gqlModel.Requirement, error) {
 	logging.Debug("fetching checkpoint (%s)", commitID.String())
 
 	request := request.CheckpointByCommit(commitID)
 
-	gql := graphql.New()
-	response := gqlModel.Checkpoint{}
+	gql := graphql.New(auth)
+	response := []*gqlModel.Requirement{}
 	err := gql.Run(request, &response)
 	if err != nil {
-		return nil, strfmt.DateTime{}, errs.Wrap(err, "gql.Run failed")
+		return nil, errs.Wrap(err, "gql.Run failed")
 	}
 
-	logging.Debug("Returning %d requirements", len(response.Requirements))
+	logging.Debug("Returning %d requirements", len(response))
 
-	if response.Commit == nil {
-		return nil, strfmt.DateTime{}, locale.WrapError(ErrNoData, "err_no_data_found")
+	if len(response) == 0 {
+		return nil, locale.WrapError(ErrNoData, "err_no_data_found")
 	}
 
-	return response.Requirements, response.Commit.AtTime, nil
+	return response, nil
+}
+
+func FetchAtTimeForCommit(commitID strfmt.UUID, auth *authentication.Auth) (strfmt.DateTime, error) {
+	logging.Debug("fetching atTime for commit (%s)", commitID.String())
+
+	request := request.CommitByID(commitID)
+
+	gql := graphql.New(auth)
+	response := gqlModel.Commit{}
+	err := gql.Run(request, &response)
+	if err != nil {
+		return strfmt.DateTime{}, errs.Wrap(err, "gql.Run failed")
+	}
+
+	logging.Debug("Returning %s", response.AtTime)
+
+	return response.AtTime, nil
 }
 
 func GqlReqsToMonoCheckpoint(requirements []*gqlModel.Requirement) []*mono_models.Checkpoint {
@@ -99,21 +141,19 @@ func GqlReqsToMonoCheckpoint(requirements []*gqlModel.Requirement) []*mono_model
 	return result
 }
 
-// FilterCheckpointPackages filters a Checkpoint removing requirements that
-// are not packages. If nil data is provided, a nil slice is returned. If no
-// packages remain after filtering, an empty slice is returned.
-func FilterCheckpointPackages(chkPt []*gqlModel.Requirement) []*gqlModel.Requirement {
+// FilterCheckpointNamespace filters a Checkpoint removing requirements that do not match the given namespace.
+func FilterCheckpointNamespace(chkPt []*gqlModel.Requirement, nsType ...NamespaceType) []*gqlModel.Requirement {
 	if chkPt == nil {
 		return nil
 	}
 
 	checkpoint := []*gqlModel.Requirement{}
-	for _, requirement := range chkPt {
-		if !NamespaceMatch(requirement.Namespace, NamespacePackageMatch) && !NamespaceMatch(requirement.Namespace, NamespaceBundlesMatch) {
-			continue
+	for _, ns := range nsType {
+		for _, requirement := range chkPt {
+			if NamespaceMatch(requirement.Namespace, ns.Matchable()) {
+				checkpoint = append(checkpoint, requirement)
+			}
 		}
-
-		checkpoint = append(checkpoint, requirement)
 	}
 
 	return checkpoint
@@ -185,33 +225,12 @@ func CheckpointToPlatforms(requirements []*gqlModel.Requirement) []strfmt.UUID {
 	return result
 }
 
-// CheckpointToLanguage returns the language from a checkpoint
-func CheckpointToLanguage(requirements []*gqlModel.Requirement) (*Language, error) {
-	for _, req := range requirements {
-		if !NamespaceMatch(req.Namespace, NamespaceLanguageMatch) {
-			continue
-		}
-		lang, err := FetchLanguageByDetails(req.Requirement, req.VersionConstraint)
-		if err != nil {
-			return nil, err
-		}
-		return lang, nil
-	}
-
-	return nil, locale.NewError("err_fetch_languages")
-}
-
 func PlatformNameToPlatformID(name string) (string, error) {
 	name = strings.ToLower(name)
 	if name == "darwin" {
 		name = "macos"
 	}
-	id, err := hostPlatformToPlatformID(name)
-	return id, err
-}
-
-func hostPlatformToPlatformID(os string) (string, error) {
-	switch strings.ToLower(os) {
+	switch strings.ToLower(name) {
 	case strings.ToLower(sysinfo.Linux.String()):
 		return constants.LinuxBit64UUID, nil
 	case strings.ToLower(sysinfo.Mac.String()):
@@ -219,7 +238,7 @@ func hostPlatformToPlatformID(os string) (string, error) {
 	case strings.ToLower(sysinfo.Windows.String()):
 		return constants.Win10Bit64UUID, nil
 	default:
-		return "", locale.NewInputError("err_unsupported_platform", "", os)
+		return "", ErrPlatformNotFound
 	}
 }
 
@@ -263,6 +282,8 @@ func platformArchToHostArch(arch, bits string) string {
 			return "sparc64"
 		case "x86":
 			return "amd64"
+		case "arm":
+			return "arm64"
 		}
 	}
 	return "unrecognized"

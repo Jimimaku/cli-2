@@ -4,26 +4,20 @@
 // allows you to set the logging level of your app in runtime.
 //
 // Logging is done just like calling fmt.Sprintf:
-// 		logging.Info("This object is %s and that is %s", obj, that)
+//
+//	logging.Info("This object is %s and that is %s", obj, that)
 //
 // example output:
-//	2013/05/07 01:20:26 INFO @ db.go:528: Registering plugin REPLICATION
-//	2013/05/07 01:20:26 INFO @ db.go:562: Registered 6 plugins and 22 commands
-//	2013/05/07 01:20:26 INFO @ slave.go:277: Running replication watchdog loop!
-//	2013/05/07 01:20:26 INFO @ redis.go:49: Redis adapter listening on 0.0.0.0:2000
-//	2013/05/07 01:20:26 WARN @ main.go:69: Starting adapter...
-//	2013/05/07 01:20:26 INFO @ db.go:966: Finished dump load. Loaded 2 objects from dump
-//	2013/05/07 01:22:26 INFO @ db.go:329: Checking persistence... 0 changes since 2m0.000297531s
-//	2013/05/07 01:22:26 INFO @ db.go:337: No need to save the db. no changes...
-//	2013/05/07 01:22:26 DEBUG @ db.go:341: Sleeping for 2m0s
 //
+// [DBG 1670353253256778 instance.go:123] Setting config: projects
+// [DBG 1670353253259897 subshell.go:95] Detected SHELL: zsh
+// [DBG 1670353253259915 subshell.go:132] Using binary: /bin/zsh
 package logging
 
 // This package may NOT depend on failures (directly or indirectly)
 
 import (
 	"bytes"
-	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -34,6 +28,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/ActiveState/cli/internal/errs"
 	"github.com/ActiveState/cli/internal/osutils/stacktrace"
 )
 
@@ -53,7 +48,7 @@ const (
 
 var levels_ascending = []int{DEBUG, INFO, WARNING, ERROR, NOTICE, CRITICAL}
 
-var LevlelsByName = map[string]int{
+var LevelsByName = map[string]int{
 	"DEBUG":    DEBUG,
 	"INFO":     INFO,
 	"WARNING":  WARN,
@@ -67,7 +62,7 @@ var LevlelsByName = map[string]int{
 	"NOTHING":  NOTHING,
 }
 
-//default logging level is ALL
+// default logging level is ALL
 var level int = ALL
 
 // Set the logging level.
@@ -76,11 +71,12 @@ var level int = ALL
 // of active levels.
 //
 // e.g. for INFO and ERROR use:
-// 		SetLevel(logging.INFO | logging.ERROR)
+//
+//	SetLevel(logging.INFO | logging.ERROR)
 //
 // For everything but debug and info use:
-// 		SetLevel(logging.ALL &^ (logging.INFO | logging.DEBUG))
 //
+//	SetLevel(logging.ALL &^ (logging.INFO | logging.DEBUG))
 func SetLevel(l int) {
 	level = l
 }
@@ -105,7 +101,7 @@ func SetMinimalLevel(l int) {
 // Possible level names are DEBUG, INFO, WARNING, ERROR, NOTICE, CRITICAL
 func SetMinimalLevelByName(l string) error {
 	l = strings.ToUpper(strings.Trim(l, " "))
-	level, found := LevlelsByName[l]
+	level, found := LevelsByName[l]
 	if !found {
 		Error("Could not set level - not found level %s", l)
 		return fmt.Errorf("Invalid level %s", l)
@@ -120,7 +116,7 @@ func SetOutput(w io.Writer) {
 	log.SetOutput(w)
 }
 
-//a pluggable logger interface
+// a pluggable logger interface
 type LoggingHandler interface {
 	SetFormatter(Formatter)
 	SetVerbose(bool)
@@ -130,38 +126,43 @@ type LoggingHandler interface {
 	Close()
 }
 
-type strandardHandler struct {
+type standardHandler struct {
 	formatter Formatter
+	verbose   bool
 }
 
-func (l *strandardHandler) SetFormatter(f Formatter) {
+func (l *standardHandler) SetFormatter(f Formatter) {
 	l.formatter = f
 }
 
-func (l *strandardHandler) SetVerbose(v bool) {
+func (l *standardHandler) SetVerbose(v bool) {
+	l.verbose = v
 }
 
-func (l *strandardHandler) Output() io.Writer {
+func (l *standardHandler) Output() io.Writer {
 	return nil
 }
 
 // default handling interface - just
-func (l *strandardHandler) Emit(ctx *MessageContext, message string, args ...interface{}) error {
-	fmt.Fprintln(os.Stderr, l.formatter.Format(ctx, message, args...))
+func (l *standardHandler) Emit(ctx *MessageContext, message string, args ...interface{}) error {
+	if l.verbose {
+		fmt.Fprintln(os.Stderr, l.formatter.Format(ctx, message, args...))
+	}
 	return nil
 }
 
 // Printf satifies a Logger interface allowing us to funnel our
 // logging handlers to 3rd party libraries
-func (l *strandardHandler) Printf(msg string, args ...interface{}) {
+func (l *standardHandler) Printf(msg string, args ...interface{}) {
 	logMsg := fmt.Sprintf("Third party log message: %s", msg)
-	l.Emit(getContext("DEBUG", 1), logMsg, args...)
+	l.Emit(getContext("DBG", 1), logMsg, args...)
 }
 
-func (l *strandardHandler) Close() {}
+func (l *standardHandler) Close() {}
 
-var currentHandler LoggingHandler = &strandardHandler{
+var currentHandler LoggingHandler = &standardHandler{
 	DefaultFormatter,
+	os.Getenv("VERBOSE") != "",
 }
 
 // Set the current handler of the library. We currently support one handler, but it might be nice to have more
@@ -180,7 +181,7 @@ type MessageContext struct {
 	TimeStamp time.Time
 }
 
-//get the stack (line + file) context to return the caller to the log
+// get the stack (line + file) context to return the caller to the log
 func getContext(level string, skipDepth int) *MessageContext {
 
 	_, file, line, _ := runtime.Caller(skipDepth)
@@ -197,7 +198,7 @@ func getContext(level string, skipDepth int) *MessageContext {
 // Output debug logging messages
 func Debug(msg string, args ...interface{}) {
 	if level&DEBUG != 0 {
-		writeMessage("DEBUG", msg, args...)
+		writeMessage("DBG", msg, args...)
 	}
 }
 
@@ -205,7 +206,7 @@ type writer struct{}
 
 func (w *writer) Write(p []byte) (n int, err error) {
 	if level&DEBUG != 0 {
-		writeMessage("DEBUG", string(p))
+		writeMessage("DBG", string(p))
 	}
 	return len(p), nil
 }
@@ -243,12 +244,14 @@ func writeMessageDepth(depth int, level string, msg string, args ...interface{})
 	// We go over the args, and replace any function pointer with the signature
 	// func() interface{} with the return value of executing it now.
 	// This allows lazy evaluation of arguments which are return values
+	// Also, unpack error objects.
 	for i, arg := range args {
-		switch arg.(type) {
+		switch arg := arg.(type) {
 		case func() interface{}:
-			args[i] = arg.(func() interface{})()
+			args[i] = arg
+		case error:
+			args[i] = errs.JoinMessage(arg)
 		default:
-
 		}
 	}
 
@@ -261,25 +264,16 @@ func writeMessageDepth(depth int, level string, msg string, args ...interface{})
 }
 
 func printLogError(err error, ctx *MessageContext, msg string, args ...interface{}) {
-	errMsg := err.Error()
-	errw := err
-	for {
-		errw = errors.Unwrap(errw)
-		if errw == nil {
-			break
-		}
-		errMsg += ": " + errw.Error()
-	}
-	fmt.Fprintf(os.Stderr, "Error writing log message: %s\n", errMsg)
+	fmt.Fprintf(os.Stderr, "Error writing log message: %s\n", errs.JoinMessage(err))
 	fmt.Fprintln(os.Stderr, DefaultFormatter.Format(ctx, msg, args...))
 }
 
-//output INFO level messages
+// output INFO level messages
 func Info(msg string, args ...interface{}) {
 
 	if level&INFO != 0 {
 
-		writeMessage("INFO", msg, args...)
+		writeMessage("INF", msg, args...)
 
 	}
 }
@@ -287,7 +281,7 @@ func Info(msg string, args ...interface{}) {
 // Output WARNING level messages
 func Warning(msg string, args ...interface{}) {
 	if level&WARN != 0 {
-		writeMessage("WARNING", msg, args...)
+		writeMessage("WRN", msg, args...)
 	}
 }
 
@@ -295,21 +289,21 @@ func Warning(msg string, args ...interface{}) {
 // This should be used sparingly, as multilog.Error() is preferred.
 func Error(msg string, args ...interface{}) {
 	if level&ERROR != 0 {
-		writeMessage("ERROR", msg+"\n\nStacktrace: "+stacktrace.Get().String()+"\n", args...)
+		writeMessage("ERR", msg+"\n\nStacktrace: "+stacktrace.Get().String()+"\n", args...)
 	}
 }
 
 // Same as Error() but without a stacktrace.
 func ErrorNoStacktrace(msg string, args ...interface{}) {
 	if level&ERROR != 0 {
-		writeMessage("ERROR", msg, args...)
+		writeMessage("ERR", msg, args...)
 	}
 }
 
 // Output NOTICE level messages
 func Notice(msg string, args ...interface{}) {
 	if level&NOTICE != 0 {
-		writeMessage("NOTICE", msg, args...)
+		writeMessage("NOT", msg, args...)
 	}
 }
 
@@ -317,7 +311,7 @@ func Notice(msg string, args ...interface{}) {
 // This should be called sparingly, as multilog.Critical() is preferred.
 func Critical(msg string, args ...interface{}) {
 	if level&CRITICAL != 0 {
-		writeMessage("CRITICAL", msg, args...)
+		writeMessage("CRT", msg, args...)
 		log.Println(string(debug.Stack()))
 	}
 }
@@ -353,7 +347,7 @@ func (lb bridge) Write(p []byte) (n int, err error) {
 // through this logger, at a given level.
 func BridgeStdLog(level int) {
 
-	for k, l := range LevlelsByName {
+	for k, l := range LevelsByName {
 		if l == level {
 			b := bridge{
 				level:     l,

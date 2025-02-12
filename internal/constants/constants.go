@@ -1,5 +1,9 @@
 package constants
 
+import (
+	"time"
+)
+
 // LibraryName contains the main name of this library
 const LibraryName = "cli"
 
@@ -20,6 +24,9 @@ const ServiceCommandName = "state-svc"
 
 // ConfigFileName holds the name of the file that the user uses to configure their project, not to be confused with InternalConfigFileNameLegacy
 const ConfigFileName = "activestate.yaml"
+
+// BuildScriptFileName holds the name of the file that represents the build script used to generate the runtime
+const BuildScriptFileName = "buildscript.as"
 
 // InternalConfigNamespace holds the appdata folder name under which we store our config
 const InternalConfigNamespace = "activestate"
@@ -42,11 +49,20 @@ const LogBuildVerboseEnvVarName = "ACTIVESTATE_CLI_BUILD_VERBOSE"
 // DisableRuntime is the env var used to disable downloading of runtimes, useful for CI or testing
 const DisableRuntime = "ACTIVESTATE_CLI_DISABLE_RUNTIME"
 
+// DisableBuildscriptDirtyCheck is the env var used to disable the check for dirty buildscripts
+const DisableBuildscriptDirtyCheck = "ACTIVESTATE_CLI_DISABLE_BS_DIRTY_CHECK"
+
 // DisableUpdates is the env var used to disable automatic updates
 const DisableUpdates = "ACTIVESTATE_CLI_DISABLE_UPDATES"
 
-// UpdateBranchEnvVarName is the env var that is used to override which branch to pull the update from
-const UpdateBranchEnvVarName = "ACTIVESTATE_CLI_UPDATE_BRANCH"
+// DisableLanguageTemplates is the env var used to disable templating for new activestate.yaml files
+const DisableLanguageTemplates = "ACTIVESTATE_CLI_DISABLE_LANGUAGE_TEMPLATES"
+
+// UpdateChannelEnvVarName is the env var that is used to override which channel to pull the update from
+const UpdateChannelEnvVarName = "ACTIVESTATE_CLI_UPDATE_CHANNEL"
+
+// InstallBuildDependenciesEnvVarName is the env var that is used to override whether to install build dependencies
+const InstallBuildDependenciesEnvVarName = "ACTIVESTATE_CLI_INSTALL_BUILD_DEPENDENCIES"
 
 // InternalConfigFileNameLegacy is effectively the same as InternalConfigName, but includes our preferred extension
 const InternalConfigFileNameLegacy = "config.yaml"
@@ -60,14 +76,14 @@ const AutoUpdateTimeoutEnvVarName = "ACTIVESTATE_CLI_UPDATE_TIMEOUT"
 // EnvironmentEnvVarName is the name of the environment variable that specifies the current environment (dev, qa, prod, etc.)
 const EnvironmentEnvVarName = "ACTIVESTATE_ENVIRONMENT"
 
-// ProjectEnvVarName is the name of the environment variable that specifies the path of the activestate.yaml config file.
-const ProjectEnvVarName = "ACTIVESTATE_PROJECT"
-
 // ActivatedStateEnvVarName is the name of the environment variable that is set when in an activated state, its value will be the path of the project
 const ActivatedStateEnvVarName = "ACTIVESTATE_ACTIVATED"
 
 // ActivatedStateIDEnvVarName is the name of the environment variable that is set when in an activated state, its value will be a unique id identifying a specific instance of an activated state
 const ActivatedStateIDEnvVarName = "ACTIVESTATE_ACTIVATED_ID"
+
+// ActivatedStateNamespaceEnvVarName is the name of the environment variable that specifies the activated state's org/project namespace.
+const ActivatedStateNamespaceEnvVarName = "ACTIVESTATE_ACTIVATED_NAMESPACE"
 
 // ForwardedStateEnvVarName is the name of the environment variable that is set when in an activated state, its value will be the path of the project
 const ForwardedStateEnvVarName = "ACTIVESTATE_FORWARDED"
@@ -84,6 +100,9 @@ const APIHostEnvVarName = "ACTIVESTATE_API_HOST"
 // APIInsecureEnvVarName is the name of the environment variable that specifies whether the API hostURI should be insecure.
 const APIInsecureEnvVarName = "ACTIVESTATE_API_INSECURE"
 
+// APIServiceOverrideEnvVarName is the name of the environment variable that specifies an optional override of the full API URL, the service name will be appended.
+const APIServiceOverrideEnvVarName = "ACTIVESTATE_API_SERVICE_OVERRIDE_"
+
 // CPUProfileEnvVarName is the name of the environment variable that specifies whether CPU profiling should be run.
 const CPUProfileEnvVarName = "ACTIVESTATE_PROFILE_CPU"
 
@@ -93,11 +112,11 @@ const ProfileEnvVarName = "ACTIVESTATE_PROFILE"
 // SessionTokenEnvVarName records the session token
 const SessionTokenEnvVarName = "ACTIVESTATE_SESSION_TOKEN"
 
+// OverrideSessionTokenEnvVarName overrides SessionTokenEnvVarName for integration tests.
+const OverrideSessionTokenEnvVarName = "ACTIVESTATE_OVERRIDE_SESSION_TOKEN"
+
 // UpdateTagEnvVarName
 const UpdateTagEnvVarName = "ACTIVESTATE_UPDATE_TAG"
-
-// NonInteractiveEnvVarName is the name of the environment variable that specifies whether to run the State Tool without prompts
-const NonInteractiveEnvVarName = "ACTIVESTATE_NONINTERACTIVE"
 
 // E2ETestEnvVarName is the name of the environment variable that specifies that we are running under E2E tests
 const E2ETestEnvVarName = "ACTIVESTATE_E2E_TEST"
@@ -110,9 +129,6 @@ const OverwriteDefaultInstallationPathEnvVarName = "ACTIVESTATE_TEST_INSTALL_PAT
 
 // OverwriteDefaultSystemPathEnvVarName is the environment variable name to overwrite the system app installation directory updates FOR TESTING PURPOSES ONLY
 const OverwriteDefaultSystemPathEnvVarName = "ACTIVESTATE_TEST_SYSTEM_PATH"
-
-// OverrideOSNameEnvVarName is used to override the OS name used when initializing projects
-const OverrideOSNameEnvVarName = "ACTIVESTATE_OVERRIDE_OS_NAME"
 
 // TestAutoUpdateEnvVarName is used to test auto updates, when set to true will always attempt to auto update
 const TestAutoUpdateEnvVarName = "ACTIVESTATE_TEST_AUTO_UPDATE"
@@ -135,8 +151,8 @@ const OptinUnstableEnvVarName = "ACTIVESTATE_OPTIN_UNSTABLE"
 // ServiceSockDir overrides the default socket path root diriectory used by the state service
 const ServiceSockDir = "ACTIVESTATE_SVC_SOCK"
 
-// AnalyticsLogEnvVarName is used to instruct State Tool to report analytics events to the given file
-const DeprecationOverrideEnvVarName = "ACTIVESTATE_DEPRECATION_OVERRIDE"
+// NotificationsOverrideEnvVarName is used to override the location of the notifications file (for testing purposes - should hold local filepath)
+const NotificationsOverrideEnvVarName = "ACTIVESTATE_NOTIFICATIONS_OVERRIDE"
 
 // DisableErrorTipsEnvVarName disables the display of tips in error messages.
 // This should only be used by the installer so-as not to pollute error message output.
@@ -149,30 +165,30 @@ const DebugServiceRequestsEnvVarName = "ACTIVESTATE_DEBUG_SERVICE_REQUESTS"
 // This is intended for use in our integration tests, not by end-users.
 const InstallPathOverrideEnvVarName = "ACTIVESTATE_CLI_INSTALLPATH_OVERRIDE"
 
+// AutostartPathOverrideEnvVarName is used to override the default autostart path of the state service.
+const AutostartPathOverrideEnvVarName = "ACTIVESTATE_CLI_AUTOSTARTPATH_OVERRIDE"
+
+// AppInstallDirOverrideEnvVarName is used to override the default app installation path of the state tool.
+const AppInstallDirOverrideEnvVarName = "ACTIVESTATE_CLI_APPINSTALLDIR_OVERRIDE"
+
+// SvcAuthPollingRateEnvVarName is used to override the default polling rate for syncing the authenticated state with the svc
+const SvcAuthPollingRateEnvVarName = "ACTIVESTATE_SVC_AUTH_POLLING_RATE"
+
+// StateSvcLogRotateInvervalEnvVarName is the environment variable used to override the default
+// log rotation timer interval (1 minute).
+const SvcLogRotateIntervalEnvVarName = "ACTIVESTATE_CLI_LOG_ROTATE_INTERVAL_MS"
+
+// DisableActivateEventsEnvVarName is the environment variable used to disable events when activating or checking out a project
+const DisableActivateEventsEnvVarName = "ACTIVESTATE_CLI_DISABLE_ACTIVATE_EVENTS"
+
 // APIUpdateInfoURL is the URL for our update info server
 const APIUpdateInfoURL = "https://platform.activestate.com/sv/state-update/api/v1"
 
 // APIUpdateURL is the URL for our update files
-const APIUpdateURL = "https://state-tool.s3.amazonaws.com/update/state"
+const APIUpdateURL = "https://state-tool.activestate.com/update/state"
 
 // APIArtifactURL is the URL for downloading artifacts
 const APIArtifactURL = "https://s3.ca-central-1.amazonaws.com/cli-artifacts/"
-
-// ArtifactFile is the name of the artifact json file contained within artifacts
-const ArtifactFile = "artifact.json"
-
-// ArtifactArchiveName is the standardized name of an artifact archive
-const ArtifactArchiveName = "artifact.tar.gz"
-
-// ArtifactCacheFileName is the standardized name of an artifact cache file
-const ArtifactCacheFileName = "artifact_cache.json"
-
-// ArtifactMetaDir is the directory in which we store meta information about artifacts
-const ArtifactMetaDir = "artifacts"
-
-// ArtifactCacheSizeEnvVarName is the maximum size in MB of the artifact cache.
-// The default is 500MB.
-const ArtifactCacheSizeEnvVarName = "ACTIVESTATE_ARTIFACT_CACHE_SIZE_MB"
 
 // DefaultNamespaceDomain is the domain used when no namespace is given and one has to be constructed
 const DefaultNamespaceDomain = "github.com"
@@ -194,14 +210,14 @@ const DefaultRSABitLength int = 4096
 // ExpanderMaxDepth defines the maximum depth to fully expand a given value.
 const ExpanderMaxDepth = int(10)
 
-// ReleaseBranch is the branch used for release builds
-const ReleaseBranch = "release"
+// ReleaseChannel is the channel used for release builds
+const ReleaseChannel = "release"
 
-// BetaBranch is the branch used for beta builds
-const BetaBranch = "beta"
+// BetaChannel is the channel used for beta builds
+const BetaChannel = "beta"
 
-// ExperimentalBranch is the branch used for experimental builds
-const ExperimentalBranch = "master"
+// ExperimentalChannel is the channel used for experimental builds
+const ExperimentalChannel = "master"
 
 // MonoAPIPath is the api path used for the platform api
 const MonoAPIPath = "/api/v1"
@@ -230,11 +246,23 @@ const GraphqlAPIPath = "/graphql/v1/graphql"
 // MediatorAPIPath is the path used for the platform mediator api
 const MediatorAPIPath = "/sv/mediator/api"
 
+// BuildplanAPIPath is the path used for the build planner api
+const BuildplanAPIPath = "/sv/buildplanner/graphql"
+
 // RequirementsImportAPIPath is the path used for the requirements import api
 const RequirementsImportAPIPath = "/sv/reqsvc/reqs"
 
-// DeprecationInfoURL is the URL we check against to see what versions are deprecated
-const DeprecationInfoURL = "https://state-tool.s3.amazonaws.com/deprecation.json"
+// BuildPlannerAPIPath is the path used for the build planner api
+const BuildPlannerAPIPath = "/sv/buildplanner/graphql"
+
+// VulnerabilitiesAPIPath is the path used for the vulnerabilities api
+const VulnerabilitiesAPIPath = "/v13s/v1/graphql"
+
+// HasuraInventoryAPIPath is the path used for the hasura inventory api
+const HasuraInventoryAPIPath = "/sv/hasura-inventory/v1/graphql"
+
+// NotificationsInfoURL is the URL we check against to see what versions are deprecated
+const NotificationsInfoURL = "https://state-tool.s3.amazonaws.com/messages.json"
 
 // DateFormatUser is the date format we use when communicating with the end-user
 const DateFormatUser = "January 02, 2006"
@@ -245,17 +273,11 @@ const DateTimeFormatUser = "2 Jan 2006 15:04"
 // DateTimeFormatRecord is the datetime format we use when recording for internal use
 const DateTimeFormatRecord = "Mon Jan 2 2006 15:04:05 -0700 MST"
 
-// PlatformSignupURL is the account creation url used by the platform
-const PlatformSignupURL = "https://platform.activestate.com" + "/create-account"
-
-// TrayDocumentationURL is the url for the state tool documentation to be used in the state tray application
-const TrayDocumentationURL = "http://docs.activestate.com/platform/state/?utm_source=platform-application-gui&utm_medium=activestate-desktop&utm_content=drop-down&utm_campaign=maru"
+// PlatformSignupPath is the account creation path used by the platform
+const PlatformSignupPath = "/create-account"
 
 // DocumentationURL is the url for the state tool documentation
 const DocumentationURL = "http://docs.activestate.com/platform/state/"
-
-// DocumentationURLHeadless is the documentation URL for headless state docs
-const DocumentationURLHeadless = DocumentationURL + "advanced-topics/detached/"
 
 // DocumentationURLGetStarted is the documentation URL for creating projects
 const DocumentationURLGetStarted = DocumentationURL + "create-project/?utm_source=platform-application-gui&utm_medium=activestate-desktop&utm_content=drop-down&utm_campaign=maru"
@@ -275,9 +297,6 @@ const ActiveStateSupportURL = "https://www.activestate.com/support/?utm_source=p
 // ActiveStateDashboardURL is the URL for the ActiveState account preferences page
 const ActiveStateDashboardURL = "https://platform.activestate.com/?utm_source=platform-application-gui&utm_medium=activestate-desktop&utm_content=drop-down&utm_campaign=maru"
 
-// DashboardCommitURL is the URL used to inspect commits
-const DashboardCommitURL = "https://platform.activestate.com/commit/"
-
 // BugTrackerURL is the URL of our bug tracker
 const BugTrackerURL = "https://github.com/ActiveState/state-tool/issues"
 
@@ -291,66 +310,32 @@ const PlatformURL = "platform.activestate.com"
 const CheatSheetURL = "https://platform.activestate.com/state-tool-cheat-sheet"
 
 // StateToolRollbarToken is the token used by the State Tool to talk to rollbar
-const StateToolRollbarToken = "0f77e52e25324b5a870f1f2ea769024e"
-
-// StateTrayRollbarToken is the token used by the State Tray to talk to rollbar
-const StateTrayRollbarToken = "84e7a358f8bd4bf99382a208459544bb"
+const StateToolRollbarToken = "4062b6b437ed40e9aa710ce8931d7897"
 
 // StateServiceRollbarToken is the token used by the State Service to talk to rollbar
-const StateServiceRollbarToken = "8d72ba6541394d2c99c006324b3a46a7"
+const StateServiceRollbarToken = "9dce777154b84824b1a16eb4654886a9"
 
 // StateInstallerRollbarToken is the token used by the State Installer to talk to rollbar
 // Todo It is currently the same as the State Tool's
-const StateInstallerRollbarToken = "609d723b3d46474d88e31bd045d38c56"
+const StateInstallerRollbarToken = "f4105fee70c5478eab063abb1acdffa9"
 
 // OfflineInstallerRollbarToken is the token used by the Offline Installer to talk to rollbar
 const OfflineInstallerRollbarToken = "0ab5e19218bd494680bf8f5d08cf37ad"
 
 // {OS}Bit{Depth}UUID constants are the UUIDs associated with the relevant OSes
-// in the platform DB.
+// in the platform DB and leveraged by the Dashboard (PlatformMapping).
 const (
 	Win10Bit64UUID = "78977bc8-0f32-519d-80f3-9043f059398c"
-	LinuxBit64UUID = "0fa42e8c-ac7b-5dd7-9407-8aa15f9b993a"
-	MacBit64UUID   = "96b7e6f2-bebf-564c-bc1c-f04482398f38"
+	LinuxBit64UUID = "7c998ec2-7491-4e75-be4d-8885800ef5f2"
+	MacBit64UUID   = "46a5b48f-226a-4696-9746-ba4d50d661c2"
 	ValidZeroUUID  = "00000000-0000-0000-0000-000000000000"
 )
-
-// ActivePythonDistsDir represents the base name of a directory where ActivePython dists will be installed under.
-const ActivePythonDistsDir = "python"
-
-// RuntimeInstallDirs represents the directory within a distribution archive where the distribution exists.
-const RuntimeInstallDirs = "INSTALLDIR,perl"
-
-// RuntimeMetaFile is the json file that holds meta information about our runtime
-const RuntimeMetaFile = "metadata.json"
-
-// RuntimeDefinitionFilename is the filename for runtime meta data bundled with artifacts, if they are built by the alternative builder
-const RuntimeDefinitionFilename = "runtime.json"
-
-// LocalRuntimeEnvironmentDirectory is the directory (relative to the installation of a runtime build) where runtime definition files are stored
-const LocalRuntimeEnvironmentDirectory = "_runtime_store"
-
-// LocalRuntimeTempDirectory is the directory (relative to the installation of a runtime build) where temp files are stored
-const LocalRuntimeTempDirectory = "_runtime_temp"
-
-// RuntimeInstallationCompleteMarker is created after all artifacts have been installed
-// Check for existence of this file to ensure that the installation has not been interrupted prematurely.
-const RuntimeInstallationCompleteMarker = "completed"
-
-// RuntimeBuildEngineStore contains the name of the build engine that was used to create this runtime
-const RuntimeBuildEngineStore = "build_engine"
-
-// RuntimeRecipeStore contains a serialization of the recipe used to create this build
-const RuntimeRecipeStore = "recipe"
 
 // StateToolMarketingPage links to the marketing page for the state tool
 const StateToolMarketingPage = "https://www.activestate.com/products/platform/state-tool/"
 
 // PlatformMarketingPage links to the marketing page for the ActiveState Platform
 const PlatformMarketingPage = "https://www.activestate.com/products/platform/"
-
-// TermsOfServiceURLText is the URL to get the current terms of service in txt form
-const TermsOfServiceURLText = "https://www.activestate.com/wp-content/uploads/2020/03/activestate_platform_terms_service_agreement.txt"
 
 // TermsOfServiceURLLatest is the URL to get the latest terms of service in PDF form
 const TermsOfServiceURLLatest = "https://www.activestate.com/wp-content/uploads/2018/10/activestate_platform_terms_service_agreement.pdf"
@@ -379,11 +364,20 @@ const RCAppendInstallStartLine = "-- START ACTIVESTATE INSTALLATION"
 // RCAppendInstallStopLine is the end line used to denote our default installation config in RC files
 const RCAppendInstallStopLine = "-- STOP ACTIVESTATE INSTALLATION"
 
+// RCAppendAutostartStartLine is the start line used to denote our autostart executables in RC files
+const RCAppendAutostartStartLine = "## START ACTIVESTATE AUTOSTART"
+
+// RCAppendAutostartStartLine is the end line used to denote our autostart executables in RC files
+const RCAppendAutostartStopLine = "## STOP ACTIVESTATE AUTOSTART"
+
 // ForumsURL is the URL to the state tool forums
 const ForumsURL = "https://community.activestate.com/c/state-tool/"
 
 // GlobalDefaultPrefname is the pref that holds the path to the globally defaulted project
 const GlobalDefaultPrefname = "projects.active.path"
+
+// LastUsedNamespacePrefname is the pref that holds the last used org for commands that use a project
+const LastUsedNamespacePrefname = "last.used.namespace"
 
 // DefaultBranchName is the default branch name used on platform projects
 const DefaultBranchName = "main"
@@ -391,23 +385,41 @@ const DefaultBranchName = "main"
 // UnstableConfig is the config key used to determine whether the user has opted in to unstable commands
 const UnstableConfig = "optin.unstable"
 
+// AsyncRuntimeConfig is the config key used to determine whether the user has opted in to async runtimes
+const AsyncRuntimeConfig = "optin.unstable.async_runtime"
+
+// OptinBuildscriptsConfig is the config key used to determine whether the user has opted in to buildscripts
+const OptinBuildscriptsConfig = "optin.buildscripts"
+
 // ReportErrorsConfig is the config key used to determine if we will send rollbar reports
 const ReportErrorsConfig = "report.errors"
 
 // ReportAnalyticsConfig is the config key used to determine if we will send analytics reports
 const ReportAnalyticsConfig = "report.analytics"
 
-// TrayAppName is the name we give our systray application
-const TrayAppName = "ActiveState Desktop (Preview)"
+// PreferredGlibcVersionConfig is the config key used to determine the preferred glibc version
+const PreferredGlibcVersionConfig = "runtime.preferred.glibc"
+
+// SecurityPromptConfig is the config key used to determine if we will prompt the user for security related actions
+const SecurityPromptConfig = "security.prompt.enabled"
+
+// SecurityPromptLevelConfig is the config key used to determine the level of security prompts
+const SecurityPromptLevelConfig = "security.prompt.level"
 
 // SvcAppName is the name we give our state-svc application
 const SvcAppName = "State Service"
+
+// SvcLaunchFileName is the name we give files pertaining to our state-svc application
+const SvcLaunchFileName = "state-svc"
 
 // StateAppName is the name we give our state cli executable
 const StateAppName = "State Tool"
 
 // StateSvcCmd is the name of the state-svc binary
 const StateSvcCmd = "state-svc"
+
+// AutostartSvcConfigKey is the config key used to determine if the service should be run on startup.
+const AutostartSvcConfigKey = "autostart.svc"
 
 // StateCmd is the name of the state tool binary
 const StateCmd = "state"
@@ -421,21 +433,12 @@ const StateRemoteInstallerCmd = "state-remote-installer"
 // InstallerName is the name we give to our state-installer executable
 const InstallerName = "State Installer"
 
-// StateTrayCmd is the name of the state tray binary
-const StateTrayCmd = "state-tray"
-
-// UpdateDialogName is the name we give our state-update-dialog executable
-const UpdateDialogName = "State Update Dialog"
-
-// StateUpdateDialogCmd is the name of the state update dialog binary
-const StateUpdateDialogCmd = "state-update-dialog"
-
 // StateExecutorCmd is the name of the state executor binary
 const StateExecutorCmd = "state-exec"
 
-// ToplevelInstallArchiveDir is the top-level directory for files in an installation archive
-// Cf., https://www.pivotaltracker.com/story/show/177781411
-const ToplevelInstallArchiveDir = "state-install"
+// LegacyToplevelInstallArchiveDir is the top-level directory for files in an installation archive
+// This constant will be removed in DX-2081.
+const LegacyToplevelInstallArchiveDir = "state-install"
 
 // FirstMultiFileStateToolVersion is the State Tool version that introduced multi-file updates
 const FirstMultiFileStateToolVersion = "0.29.0"
@@ -458,9 +461,6 @@ const InstallerNoSubshell = "ACTIVESTATE_CLI_INSTALLER_NO_SUBSHELL"
 // InstallSourceFile is the file we use to record what installed the state tool
 const InstallSourceFile = "installsource.txt"
 
-// PpmShim is the name of the ppm shim
-const PpmShim = "ppm"
-
 // PipShim is the name of the pip shim
 const PipShim = "pip"
 
@@ -472,3 +472,24 @@ const DefaultAnalyticsPixel = "https://state-tool.s3.amazonaws.com/pixel"
 
 // AnalyticsPixelOverrideEnv is the environment variable to check for overriding the analytics pixel url
 const AnalyticsPixelOverrideEnv = "ACTIVESTATE_CLI_ANALYTICS_PIXEL"
+
+// TerminalAnimationInterval is the interval we use for terminal animations
+const TerminalAnimationInterval = 150 * time.Millisecond
+
+// ActiveStateCIEnvVarName is the environment variable set when running in an ActiveState CI environment.
+const ActiveStateCIEnvVarName = "ACTIVESTATE_CI"
+
+// OverrideSandbox is the environment variable to set when overriding the sandbox for integration tests.
+const OverrideSandbox = "ACTIVESTATE_TEST_OVERRIDE_SANDBOX"
+
+// PlatformPrivateNamespace is the namespace for private packages.
+const PlatformPrivateNamespace = "private"
+
+// OverrideShellEnvVarName is the environment variable to set when overriding the shell for shell detection.
+const OverrideShellEnvVarName = "ACTIVESTATE_CLI_SHELL_OVERRIDE"
+
+// IgnoreEnvEnvVarName is the environment variable to set for skipping specific environment variables during runtime setup.
+const IgnoreEnvEnvVarName = "ACTIVESTATE_CLI_IGNORE_ENV"
+
+// ProgressUrlPathName is the trailing path for a project's build progress.
+const BuildProgressUrlPathName = "distributions"

@@ -3,6 +3,7 @@ package sscommon
 import (
 	"fmt"
 	"reflect"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -18,9 +19,9 @@ func fakeContents(before, contents, after string) string {
 	if contents != "" {
 		blocks = append(
 			blocks,
-			fmt.Sprintf("# %s", constants.RCAppendDeployStartLine),
+			fmt.Sprintf("# %s", constants.RCAppendDefaultStartLine),
 			contents,
-			fmt.Sprintf("# %s", constants.RCAppendDeployStopLine),
+			fmt.Sprintf("# %s", constants.RCAppendDefaultStopLine),
 		)
 	}
 	if after != "" {
@@ -30,10 +31,13 @@ func fakeContents(before, contents, after string) string {
 	return strings.Join(blocks, fileutils.LineEnd)
 }
 
-func fakeFileWithContents(before, contents, after string) string {
-	f := fileutils.TempFileUnsafe()
+func fakeFileWithContents(t *testing.T, before, contents, after string) string {
+	f := fileutils.TempFileUnsafe("", "")
 	defer f.Close()
-	f.WriteString(fakeContents(before, contents, after))
+	_, err := f.WriteString(fakeContents(before, contents, after))
+	if err != nil {
+		t.Fatal(err)
+	}
 	return f.Name()
 }
 
@@ -43,40 +47,55 @@ func TestWriteRcFile(t *testing.T) {
 		path           string
 		env            map[string]string
 	}
+
+	fish := fmt.Sprintf(
+		`set -xg PATH "foo:$PATH"
+if test ! -z "$%s"; test -f "$%s/%s"
+  echo "State Tool is operating on project $%s, located at $%s"
+end`,
+		constants.ActivatedStateEnvVarName,
+		constants.ActivatedStateEnvVarName,
+		constants.ConfigFileName,
+		constants.ActivatedStateNamespaceEnvVarName,
+		constants.ActivatedStateEnvVarName)
+	if runtime.GOOS == "windows" {
+		fish = strings.ReplaceAll(fish, "\n", "\r\n")
+	}
+
 	tests := []struct {
 		name         string
 		args         args
-		want error
+		want         error
 		wantContents string
 	}{
 		{
 			"Write RC to empty file",
 			args{
 				"fishrc_append.fish",
-				fakeFileWithContents("", "", ""),
+				fakeFileWithContents(t, "", "", ""),
 				map[string]string{
 					"PATH": "foo",
 				},
 			},
 			nil,
-			fakeContents("", `set -xg PATH "foo:$PATH"`, ""),
+			fakeContents("", fish, ""),
 		},
 		{
 			"Write RC update",
 			args{
 				"fishrc_append.fish",
-				fakeFileWithContents("before", "SOMETHING ELSE", "after"),
+				fakeFileWithContents(t, "before", "SOMETHING ELSE", "after"),
 				map[string]string{
 					"PATH": "foo",
 				},
 			},
 			nil,
-			fakeContents(strings.Join([]string{"before", "after"}, fileutils.LineEnd), `set -xg PATH "foo:$PATH"`, ""),
+			fakeContents(strings.Join([]string{"before", "after"}, fileutils.LineEnd), fish, ""),
 		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			if got := WriteRcFile(tt.args.rcTemplateName, tt.args.path, DeployID, tt.args.env); !reflect.DeepEqual(got, tt.want) {
+			if got := WriteRcFile(tt.args.rcTemplateName, tt.args.path, DefaultID, tt.args.env); !reflect.DeepEqual(got, tt.want) {
 				t.Errorf("WriteRcFile() = %v, want %v", got, tt.want)
 			}
 			if !fileutils.FileExists(tt.args.path) {

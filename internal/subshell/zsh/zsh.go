@@ -2,7 +2,6 @@ package zsh
 
 import (
 	"fmt"
-	"io/ioutil"
 	"log"
 	"os"
 	"os/exec"
@@ -96,10 +95,9 @@ func (v *SubShell) WriteCompletionScript(completionScript string) error {
 	}
 
 	fpath := filepath.Join(dir, "_"+constants.CommandName)
-	logging.Debug("Writing to %s: %s", fpath, completionScript)
 	err := fileutils.WriteFile(fpath, []byte(completionScript))
 	if err != nil {
-		return errs.Wrap(err, "Could not write completions script")
+		logging.Debug("Could not write completions script '%s', likely due to non-admin privileges", fpath)
 	}
 
 	homeDir, err := user.HomeDir()
@@ -135,9 +133,9 @@ func (v *SubShell) EnsureRcFileExists() error {
 }
 
 // SetupShellRcFile - subshell.SubShell
-func (v *SubShell) SetupShellRcFile(targetDir string, env map[string]string, namespace *project.Namespaced) error {
+func (v *SubShell) SetupShellRcFile(targetDir string, env map[string]string, namespace *project.Namespaced, cfg sscommon.Configurable) error {
 	env = sscommon.EscapeEnv(env)
-	return sscommon.SetupShellRcFile(filepath.Join(targetDir, "shell.zsh"), "zshrc_global.sh", env, namespace)
+	return sscommon.SetupShellRcFile(filepath.Join(targetDir, "shell.zsh"), "zshrc_global.sh", env, namespace, cfg)
 }
 
 // SetEnv - see subshell.SetEnv
@@ -163,7 +161,7 @@ func (v *SubShell) Activate(proj *project.Project, cfg sscommon.Configurable, ou
 			return err
 		}
 
-		path, err := ioutil.TempDir("", "state-zsh")
+		path, err := os.MkdirTemp("", "state-zsh")
 		if err != nil {
 			return errs.Wrap(err, "OS failure")
 		}

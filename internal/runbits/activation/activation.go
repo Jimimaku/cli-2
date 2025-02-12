@@ -1,7 +1,6 @@
 package activation
 
 import (
-	"fmt"
 	"os"
 	"path/filepath"
 	rt "runtime"
@@ -40,7 +39,7 @@ func ActivateAndWait(
 		}
 	}
 
-	ve, err := venv.GetEnv(false, true, projectDir)
+	ve, err := venv.GetEnv(false, true, projectDir, proj.Namespace().String())
 	if err != nil {
 		return locale.WrapError(err, "error_could_not_activate_venv", "Could not retrieve environment information.")
 	}
@@ -51,15 +50,6 @@ func ActivateAndWait(
 		ve[constants.DisableErrorTipsEnvVarName] = "false"
 	}
 
-	// If we're not using plain output then we should just dump the environment information
-	if out.Type() != output.PlainFormatName && out.Type() != output.SimpleFormatName {
-		if out.Type() == output.EditorV0FormatName {
-			fmt.Println("[activated-JSON]")
-		}
-		out.Print(ve)
-		return nil
-	}
-
 	// ignore interrupts in State Tool on Windows
 	if rt.GOOS == "windows" {
 		bs := sighandler.NewBackgroundSignalHandler(func(_ os.Signal) {}, os.Interrupt)
@@ -67,7 +57,7 @@ func ActivateAndWait(
 	}
 	defer func() {
 		if rt.GOOS == "windows" {
-			sighandler.Pop()
+			_ = sighandler.Pop() // Overwriting the returned error can mess up error code reporting
 		}
 	}()
 

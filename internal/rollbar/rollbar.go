@@ -9,32 +9,59 @@ import (
 
 	"github.com/ActiveState/cli/internal/condition"
 	"github.com/ActiveState/cli/internal/constants"
+	"github.com/ActiveState/cli/internal/errs"
 	"github.com/ActiveState/cli/internal/installation/storage"
 	"github.com/ActiveState/cli/internal/instanceid"
 	"github.com/ActiveState/cli/internal/logging"
 	configMediator "github.com/ActiveState/cli/internal/mediators/config"
 	"github.com/ActiveState/cli/internal/singleton/uniqid"
-
 	"github.com/rollbar/rollbar-go"
 )
 
 type config interface {
 	GetBool(key string) bool
-	IsSet(key string) bool
 	Closed() bool
 }
 
-var currentCfg config
+type doNotReport []string
 
-var reportingDisabled bool
+func (d *doNotReport) Add(msg string) {
+	if msg == "" || strings.TrimSpace(msg) == "" {
+		return
+	}
+
+	for _, m := range *d {
+		if m == msg {
+			return
+		}
+	}
+
+	*d = append(*d, msg)
+}
+
+func (d doNotReport) Contains(msg string) bool {
+	for _, m := range d {
+		if strings.EqualFold(m, msg) {
+			return true
+		}
+	}
+
+	return false
+}
+
+var (
+	currentCfg          config
+	reportingDisabled   bool
+	DoNotReportMessages doNotReport
+)
 
 func readConfig() {
-	reportingDisabled = currentCfg != nil && !currentCfg.Closed() && currentCfg.IsSet(constants.ReportErrorsConfig) && !currentCfg.GetBool(constants.ReportErrorsConfig)
+	reportingDisabled = currentCfg != nil && !currentCfg.Closed() && !currentCfg.GetBool(constants.ReportErrorsConfig)
 	logging.Debug("Sending Rollbar reports? %v", reportingDisabled)
 }
 
 func init() {
-	configMediator.RegisterOption(constants.ReportErrorsConfig, configMediator.Bool, configMediator.EmptyEvent, configMediator.EmptyEvent)
+	configMediator.RegisterOption(constants.ReportErrorsConfig, configMediator.Bool, true)
 	configMediator.AddListener(constants.ReportErrorsConfig, readConfig)
 }
 
@@ -43,19 +70,18 @@ func init() {
 var CurrentCmd string
 
 func SetupRollbar(token string) {
-	defer handlePanics(recover())
+	defer func() { handlePanics(recover()) }()
 	// set user to unknown (if it has not been set yet)
 	if _, ok := rollbar.Custom()["UserID"]; !ok {
 		UpdateRollbarPerson("unknown", "unknown", "unknown")
 	}
 	rollbar.SetRetryAttempts(0)
 	rollbar.SetToken(token)
-	rollbar.SetEnvironment(constants.BranchName)
+	rollbar.SetEnvironment(constants.ChannelName)
 
 	rollbar.SetCodeVersion(constants.Version)
 	rollbar.SetServerRoot("github.com/ActiveState/cli")
 	rollbar.SetLogger(&rollbar.SilentClientLogger{})
-	rollbar.SetCaptureIp(rollbar.CaptureIpFull)
 
 	// We can't use runtime.GOOS for the official platform field because rollbar sees that as a server-only platform
 	// (which we don't have credentials for). So we're faking it with a custom field untill rollbar gets their act together.
@@ -64,6 +90,12 @@ func SetupRollbar(token string) {
 		// We're not a server, so don't send server info (could contain sensitive info, like hostname)
 		data["server"] = map[string]interface{}{}
 		data["platform_os"] = runtime.GOOS
+		if _, exists := data["request"]; !exists {
+			data["request"] = map[string]string{}
+		}
+		if request, ok := data["request"].(map[string]string); ok {
+			request["user_ip"] = "$remote_ip" // ask Rollbar to log the user's IP
+		}
 	})
 
 	source, err := storage.InstallSource()
@@ -83,7 +115,7 @@ func SetConfig(cfg config) {
 }
 
 func UpdateRollbarPerson(userID, username, email string) {
-	defer handlePanics(recover())
+	defer func() { handlePanics(recover()) }()
 	rollbar.SetPerson(uniqid.Text(), username, email)
 
 	custom := rollbar.Custom()
@@ -100,9 +132,17 @@ func UpdateRollbarPerson(userID, username, email string) {
 // Wait is a wrapper around rollbar.Wait().
 func Wait() { rollbar.Wait() }
 
+var logDataAmenders []func(string) string
+
+// AddLogDataAmender routes log data to be sent to Rollbar through the given function first.
+// For example, that function might add more log data to be sent.
+func AddLogDataAmender(f func(string) string) {
+	logDataAmenders = append(logDataAmenders, f)
+}
+
 func logToRollbar(critical bool, message string, args ...interface{}) {
-	// only log to rollbar when on release, beta or unstable branch and when built via CI (ie., non-local build)
-	isPublicChannel := constants.BranchName == constants.ReleaseBranch || constants.BranchName == constants.BetaBranch || constants.BranchName == constants.ExperimentalBranch
+	// only log to rollbar when on release, beta or unstable channel and when built via CI (ie., non-local build)
+	isPublicChannel := constants.ChannelName == constants.ReleaseChannel || constants.ChannelName == constants.BetaChannel || constants.ChannelName == constants.ExperimentalChannel
 	if !isPublicChannel || !condition.BuiltViaCI() || reportingDisabled {
 		return
 	}
@@ -111,6 +151,9 @@ func logToRollbar(critical bool, message string, args ...interface{}) {
 	logData := logging.ReadTail()
 	if len(logData) == logging.TailSize {
 		logData = "<truncated>\n" + logData
+	}
+	for _, f := range logDataAmenders {
+		logData = f(logData)
 	}
 	data["log_file_data"] = logData
 
@@ -129,9 +172,20 @@ func logToRollbar(critical bool, message string, args ...interface{}) {
 		}
 	}
 
+	// Unpack error objects.
+	for i, arg := range args {
+		if err, ok := arg.(error); ok {
+			args[i] = errs.JoinMessage(err)
+		}
+	}
+
 	rollbarMsg := fmt.Sprintf("%s %s: %s", exec, flags, fmt.Sprintf(message, args...))
 	if len(rollbarMsg) > 1000 {
 		rollbarMsg = rollbarMsg[0:1000] + " <truncated>"
+	}
+
+	if DoNotReportMessages.Contains(rollbarMsg) {
+		return
 	}
 
 	if critical {

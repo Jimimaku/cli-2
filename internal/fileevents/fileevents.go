@@ -48,7 +48,9 @@ func New(pj *project.Project) (*FileEvents, error) {
 		}
 	}
 
-	fe.watcher.OnEvent(fe.onEvent)
+	if err := fe.watcher.OnEvent(fe.onEvent); err != nil {
+		return nil, errs.Wrap(err, "Could not set event handler")
+	}
 	return fe, nil
 }
 
@@ -107,7 +109,7 @@ func (fe *FileEvents) onEvent(affectedFilepath string, log logging.Logger) error
 		}
 		err = runScript(value, logger)
 		if err != nil {
-			return locale.NewError("err_fileevent_cmd", "Could not run the script `{{.V0}}`, please ensure its name is valid and you can run `state run {{.V0}}`.", value)
+			return locale.NewError("err_fileevent_cmd", "Could not run the script `{{.V0}}`. Please ensure its name is valid and you can run `state run {{.V0}}`.", value)
 		}
 	}
 	return nil
@@ -140,10 +142,10 @@ func runScript(name string, log logging.Logger) error {
 	go captureStd(stdout, log)
 
 	if err := cmd.Start(); err != nil {
-		return locale.WrapError(err, "err_fileevent_cmd_start", "Could not run script `{{.V0}}`, error: {{.V1}}.", name, err.Error())
+		return locale.WrapError(err, "err_fileevent_cmd_start", "Could not run script `{{.V0}}`. Error: {{.V1}}.", name, err.Error())
 	}
 	if err := cmd.Wait(); err != nil {
-		return locale.WrapError(err, "err_fileevent_cmd_start", "Error happened while running script `{{.V0}}`, error: {{.V1}}.", name, err.Error())
+		return locale.WrapError(err, "err_fileevent_cmd_start", "Error happened while running script `{{.V0}}`. Error: {{.V1}}.", name, err.Error())
 	}
 
 	log(locale.Tl("script_finished", "Script Finished"))

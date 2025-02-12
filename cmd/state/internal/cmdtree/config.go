@@ -10,18 +10,18 @@ import (
 func newConfigCommand(prime *primer.Values) *captain.Command {
 	return captain.NewCommand(
 		"config",
-		locale.Tl("config_title", "Config"),
+		locale.Tl("config_title", "Listing Configuration Keys and Values"),
 		locale.Tl("config_description", "Manage the State Tool configuration"),
 		prime,
 		[]*captain.Flag{},
 		[]*captain.Argument{},
 		func(ccmd *captain.Command, _ []string) error {
-			runner, err := config.NewConfig(prime)
+			runner, err := config.NewList(prime)
 			if err != nil {
 				return err
 			}
-			return runner.Run(ccmd.Usage)
-		}).SetGroup(UtilsGroup)
+			return runner.Run()
+		}).SetGroup(UtilsGroup).SetSupportsStructuredOutput()
 }
 
 func newConfigGetCommand(prime *primer.Values) *captain.Command {
@@ -43,12 +43,12 @@ func newConfigGetCommand(prime *primer.Values) *captain.Command {
 		func(ccmd *captain.Command, args []string) error {
 			runner := config.NewGet(prime)
 			return runner.Run(params)
-		})
+		}).SetSupportsStructuredOutput()
 }
 
 func newConfigSetCommand(prime *primer.Values) *captain.Command {
 	params := config.SetParams{}
-	return captain.NewCommand(
+	cmd := captain.NewCommand(
 		"set",
 		locale.Tl("config_set_title", "Set config value"),
 		locale.Tl("config_set_description", "Set config values using the terminal"),
@@ -72,4 +72,7 @@ func newConfigSetCommand(prime *primer.Values) *captain.Command {
 			runner := config.NewSet(prime)
 			return runner.Run(params)
 		})
+	cmd.SetSkipChecks(true)
+	cmd.SetSupportsStructuredOutput()
+	return cmd
 }

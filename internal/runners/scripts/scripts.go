@@ -1,10 +1,12 @@
 package scripts
 
 import (
+	"github.com/ActiveState/cli/internal/errs"
 	"github.com/ActiveState/cli/internal/locale"
 	"github.com/ActiveState/cli/internal/logging"
 	"github.com/ActiveState/cli/internal/output"
 	"github.com/ActiveState/cli/internal/primer"
+	"github.com/ActiveState/cli/internal/runbits/rationalize"
 	"github.com/ActiveState/cli/pkg/project"
 )
 
@@ -32,34 +34,30 @@ type scriptLine struct {
 	Description string `json:"description,omitempty"`
 }
 
-type scriptsTable struct {
-	rows []scriptLine
-}
-
 func (s *Scripts) Run() error {
 	logging.Debug("Execute scripts command")
 
 	if s.project == nil {
-		return locale.NewInputError("err_no_project")
+		return rationalize.ErrNoProject
 	}
-
-	scripts := s.project.Scripts()
-
-	if len(scripts) == 0 {
-		s.output.Print(locale.T("scripts_no_scripts"))
-		return nil
-	}
+	s.output.Notice(locale.Tr("operating_message", s.project.NamespaceString(), s.project.Dir()))
 
 	name, owner := s.project.Name(), s.project.Owner()
 	logging.Debug("listing scripts for org=%s, project=%s", owner, name)
-	var rows []scriptLine
-	for _, s := range scripts {
-		row := scriptLine{
-			s.Name(), s.Description(),
-		}
-		rows = append(rows, row)
-	}
-	s.output.Print(rows)
 
+	projectScripts, err := s.project.Scripts()
+	if err != nil {
+		return errs.Wrap(err, "Could not get scripts")
+	}
+	scripts := make([]scriptLine, len(projectScripts))
+	for i, s := range projectScripts {
+		scripts[i] = scriptLine{s.Name(), s.Description()}
+	}
+
+	var plainOutput interface{} = scripts
+	if len(scripts) == 0 {
+		plainOutput = locale.T("scripts_no_scripts")
+	}
+	s.output.Print(output.Prepare(plainOutput, scripts))
 	return nil
 }

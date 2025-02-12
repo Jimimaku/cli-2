@@ -1,6 +1,7 @@
 package integration
 
 import (
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -11,16 +12,17 @@ import (
 	"github.com/ActiveState/cli/internal/config"
 	"github.com/ActiveState/cli/internal/constants"
 	"github.com/ActiveState/cli/internal/fileutils"
+	"github.com/ActiveState/cli/internal/installation/storage"
 	"github.com/ActiveState/cli/internal/osutils"
 	"github.com/ActiveState/cli/internal/osutils/autostart"
 	"github.com/ActiveState/cli/internal/osutils/user"
 	"github.com/ActiveState/cli/internal/rtutils/singlethread"
 	"github.com/ActiveState/cli/internal/subshell"
 	"github.com/ActiveState/cli/internal/testhelpers/e2e"
+	"github.com/ActiveState/cli/internal/testhelpers/suite"
 	"github.com/ActiveState/cli/internal/testhelpers/tagsuite"
-	"github.com/ActiveState/cli/pkg/platform/runtime/setup"
-	rt "github.com/ActiveState/cli/pkg/platform/runtime/target"
-	"github.com/stretchr/testify/suite"
+	rt "github.com/ActiveState/cli/pkg/runtime"
+	"github.com/ActiveState/cli/pkg/runtime_helpers"
 )
 
 type PrepareIntegrationTestSuite struct {
@@ -36,9 +38,13 @@ func (suite *PrepareIntegrationTestSuite) TestPrepare() {
 	ts := e2e.New(suite.T(), false)
 	defer ts.Close()
 
+	autostartDir := filepath.Join(ts.Dirs.Work, "autostart")
+	err := fileutils.Mkdir(autostartDir)
+	suite.Require().NoError(err)
+
 	cp := ts.SpawnWithOpts(
-		e2e.WithArgs("_prepare"),
-		// e2e.AppendEnv(fmt.Sprintf("ACTIVESTATE_CLI_CONFIGDIR=%s", ts.Dirs.Work)),
+		e2e.OptArgs("_prepare"),
+		e2e.OptAppendEnv(fmt.Sprintf("%s=%s", constants.AutostartPathOverrideEnvVarName, autostartDir)),
 	)
 	cp.ExpectExitCode(0)
 
@@ -48,14 +54,10 @@ func (suite *PrepareIntegrationTestSuite) TestPrepare() {
 	if isAdmin {
 		return
 	}
-	suite.AssertConfig(filepath.Join(ts.Dirs.Cache, "bin"))
+	suite.AssertConfig(storage.CachePath())
 
 	// Verify autostart was enabled.
-	cfg, err := config.New()
-	suite.Require().NoError(err)
-	as, err := autostart.New(svcAutostart.App, ts.SvcExe, nil, svcAutostart.Options, cfg)
-	suite.Require().NoError(err)
-	enabled, err := as.IsEnabled()
+	enabled, err := autostart.IsEnabled(constants.StateSvcCmd, svcAutostart.Options)
 	suite.Require().NoError(err)
 	suite.Assert().True(enabled, "autostart is not enabled")
 
@@ -65,13 +67,13 @@ func (suite *PrepareIntegrationTestSuite) TestPrepare() {
 		suite.Require().NoError(err)
 		profile := filepath.Join(homeDir, ".profile")
 		profileContents := string(fileutils.ReadFileUnsafe(profile))
-		suite.Contains(profileContents, as.Exec, "autostart should be configured for Linux server environment")
+		suite.Contains(profileContents, constants.StateSvcCmd, "autostart should be configured for Linux server environment")
 	}
 
 	// Verify autostart can be disabled.
-	err = as.Disable()
+	err = autostart.Disable(constants.StateSvcCmd, svcAutostart.Options)
 	suite.Require().NoError(err)
-	enabled, err = as.IsEnabled()
+	enabled, err = autostart.IsEnabled(constants.StateSvcCmd, svcAutostart.Options)
 	suite.Require().NoError(err)
 	suite.Assert().False(enabled, "autostart is still enabled")
 
@@ -81,7 +83,13 @@ func (suite *PrepareIntegrationTestSuite) TestPrepare() {
 		suite.Require().NoError(err)
 		profile := filepath.Join(homeDir, ".profile")
 		profileContents := fileutils.ReadFileUnsafe(profile)
-		suite.NotContains(profileContents, as.Exec, "autostart should not be configured for Linux server environment anymore")
+		suite.NotContains(profileContents, constants.StateSvcCmd, "autostart should not be configured for Linux server environment anymore")
+	}
+
+	// Verify the Windows shortcuts were installed.
+	if runtime.GOOS == "windows" {
+		shortcutDir := filepath.Join(ts.Dirs.HomeDir, "AppData", "Roaming", "Microsoft", "Windows", "Start Menu", "Programs", "ActiveState")
+		suite.DirExists(shortcutDir, "shortcut dir should exist after prepare")
 	}
 }
 
@@ -109,17 +117,15 @@ func (suite *PrepareIntegrationTestSuite) AssertConfig(target string) {
 
 func (suite *PrepareIntegrationTestSuite) TestResetExecutors() {
 	suite.OnlyRunForTags(tagsuite.Prepare)
-	ts := e2e.New(suite.T(), true, "ACTIVESTATE_CLI_DISABLE_RUNTIME=false")
+	ts := e2e.New(suite.T(), false)
 	err := ts.ClearCache()
 	suite.Require().NoError(err)
 	defer ts.Close()
 
-	cp := ts.SpawnWithOpts(
-		e2e.WithArgs("activate", "ActiveState-CLI/small-python", "--path", ts.Dirs.Work, "--default"),
-	)
-	cp.ExpectLongString("This project will always be available for use")
+	cp := ts.Spawn("activate", "ActiveState-CLI/small-python", "--path", ts.Dirs.Work, "--default")
+	cp.Expect("This project will always be available for use")
 	cp.Expect("Downloading")
-	cp.Expect("Installing")
+	cp.Expect("Installing", e2e.RuntimeSourcingTimeoutOpt)
 	cp.Expect("Activated")
 
 	cp.SendLine("exit")
@@ -132,30 +138,30 @@ func (suite *PrepareIntegrationTestSuite) TestResetExecutors() {
 
 	// Remove global executors
 	globalExecDir := filepath.Join(ts.Dirs.Cache, "bin")
-	os.RemoveAll(globalExecDir)
+	err = os.RemoveAll(globalExecDir)
+	suite.Assert().NoError(err, "should have removed executor directory, to ensure that it gets re-created")
 
 	// check existens of exec dir
-	targetDir := rt.ProjectDirToTargetDir(ts.Dirs.Work, ts.Dirs.Cache)
-	projectExecDir := setup.ExecDir(targetDir)
+	targetDir := filepath.Join(ts.Dirs.Cache, runtime_helpers.DirNameFromProjectDir(ts.Dirs.Work))
+	projectExecDir := rt.ExecutorsPath(targetDir)
 	suite.DirExists(projectExecDir)
 
-	suite.Assert().NoError(err, "should have removed executor directory, to ensure that it gets re-created")
+	// Invalidate hash
+	hashPath := filepath.Join(targetDir, ".activestate", "hash.txt")
+	suite.Require().NoError(fileutils.WriteFile(hashPath, []byte("bogus")))
 
 	cp = ts.Spawn("_prepare")
 	cp.ExpectExitCode(0)
 
-	// remove complete marker to force re-creation of executors
-	err = os.Remove(filepath.Join(targetDir, constants.LocalRuntimeEnvironmentDirectory, constants.RuntimeInstallationCompleteMarker))
-	suite.Assert().NoError(err, "removal of complete marker should have worked")
-
-	suite.FileExists(filepath.Join(globalExecDir, "python3"+osutils.ExeExt))
-	err = os.RemoveAll(projectExecDir)
+	suite.Require().FileExists(filepath.Join(globalExecDir, "python3"+osutils.ExeExtension), ts.DebugMessage(""))
+	suite.Require().NoError(os.RemoveAll(projectExecDir), "should have removed executor directory, to ensure that it gets re-created")
 
 	cp = ts.Spawn("activate")
-	cp.Expect("Activated")
+	cp.Expect("Activated", e2e.RuntimeSourcingTimeoutOpt)
 	cp.SendLine("which python3")
-	cp.SendLine("python3 --version")
+	cp.SendLine("python3")
 	cp.Expect("ActiveState")
+	cp.SendLine("exit()") // exit from Python interpreter
 	cp.SendLine("exit")
 	cp.ExpectExitCode(0)
 

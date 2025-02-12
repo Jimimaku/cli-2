@@ -1,18 +1,19 @@
 package main
 
 import (
-	"bufio"
 	"context"
 	"errors"
 	"fmt"
 	"os"
-	"os/exec"
 	"runtime/debug"
 	"strings"
 	"time"
 
 	"github.com/ActiveState/cli/cmd/state/internal/cmdtree"
+	"github.com/ActiveState/cli/cmd/state/internal/cmdtree/exechandlers/notifier"
 	anAsync "github.com/ActiveState/cli/internal/analytics/client/async"
+	anaConst "github.com/ActiveState/cli/internal/analytics/constants"
+	"github.com/ActiveState/cli/internal/captain"
 	"github.com/ActiveState/cli/internal/config"
 	"github.com/ActiveState/cli/internal/constants"
 	"github.com/ActiveState/cli/internal/constraints"
@@ -22,6 +23,8 @@ import (
 	"github.com/ActiveState/cli/internal/installation/storage"
 	"github.com/ActiveState/cli/internal/locale"
 	"github.com/ActiveState/cli/internal/logging"
+	configMediator "github.com/ActiveState/cli/internal/mediators/config"
+	"github.com/ActiveState/cli/internal/migrator"
 	"github.com/ActiveState/cli/internal/multilog"
 	"github.com/ActiveState/cli/internal/output"
 	"github.com/ActiveState/cli/internal/primer"
@@ -29,16 +32,16 @@ import (
 	"github.com/ActiveState/cli/internal/prompt"
 	_ "github.com/ActiveState/cli/internal/prompt" // Sets up survey defaults
 	"github.com/ActiveState/cli/internal/rollbar"
+	"github.com/ActiveState/cli/internal/rtutils"
+	runbits_errors "github.com/ActiveState/cli/internal/runbits/errors"
 	"github.com/ActiveState/cli/internal/runbits/panics"
 	"github.com/ActiveState/cli/internal/subshell"
 	"github.com/ActiveState/cli/internal/svcctl"
-	cmdletErrors "github.com/ActiveState/cli/pkg/cmdlets/errors"
 	secretsapi "github.com/ActiveState/cli/pkg/platform/api/secrets"
 	"github.com/ActiveState/cli/pkg/platform/authentication"
 	"github.com/ActiveState/cli/pkg/platform/model"
 	"github.com/ActiveState/cli/pkg/project"
 	"github.com/ActiveState/cli/pkg/projectfile"
-	"golang.org/x/crypto/ssh/terminal"
 )
 
 func main() {
@@ -47,6 +50,9 @@ func main() {
 	var exitCode int
 	// Set up logging
 	rollbar.SetupRollbar(constants.StateToolRollbarToken)
+
+	// We have to disable mouse trap as without it the state:// protocol cannot work
+	captain.DisableMousetrap()
 
 	var cfg *config.Instance
 	defer func() {
@@ -73,16 +79,27 @@ func main() {
 	var err error
 	cfg, err = config.New()
 	if err != nil {
-		multilog.Critical("Could not initialize config: %v", errs.JoinMessage(err))
-		fmt.Fprintf(os.Stderr, "Could not load config, if this problem persists please reinstall the State Tool. Error: %s\n", errs.JoinMessage(err))
+		if !locale.IsInputError(err) {
+			multilog.Critical("Could not initialize config: %v", errs.JoinMessage(err))
+			fmt.Fprintf(os.Stderr, "Could not load config, if this problem persists please reinstall the State Tool. Error: %s\n", errs.JoinMessage(err))
+		} else {
+			for _, err2 := range locale.UnpackError(err) {
+				fmt.Fprintf(os.Stderr, err2.Error())
+			}
+		}
 		exitCode = 1
 		return
 	}
 	rollbar.SetConfig(cfg)
 
+	// Configuration options
+	// This should only be used if the config option is not exclusive to one package.
+	configMediator.RegisterOption(constants.OptinBuildscriptsConfig, configMediator.Bool, false)
+
 	// Set up our output formatter/writer
 	outFlags := parseOutputFlags(os.Args)
-	out, err := initOutput(outFlags, "")
+	shellName, _ := subshell.DetectShell(cfg)
+	out, err := initOutput(outFlags, "", shellName)
 	if err != nil {
 		multilog.Critical("Could not initialize outputer: %s", errs.JoinMessage(err))
 		os.Stderr.WriteString(locale.Tr("err_main_outputer", err.Error()))
@@ -93,33 +110,17 @@ func main() {
 	// Set up our legacy outputer
 	setPrinterColors(outFlags)
 
-	isInteractive := strings.ToLower(os.Getenv(constants.NonInteractiveEnvVarName)) != "true" &&
-		!outFlags.NonInteractive &&
-		terminal.IsTerminal(int(os.Stdin.Fd())) &&
-		out.Type() != output.EditorV0FormatName &&
-		out.Type() != output.EditorFormatName
 	// Run our main command logic, which is logic that defers to the error handling logic below
-	err = run(os.Args, isInteractive, cfg, out)
+	err = run(os.Args, cfg, out)
 	if err != nil {
-		exitCode, err = cmdletErrors.Unwrap(err)
+		exitCode, err = runbits_errors.ParseUserFacing(err)
 		if err != nil {
 			out.Error(err)
-		}
-
-		// If a state tool error occurs in a VSCode integrated terminal, we want
-		// to pause and give time to the user to read the error message.
-		// But not, if we exit, because the last command in the activated sub-shell failed.
-		var eerr *exec.ExitError
-		isExitError := errors.As(err, &eerr)
-		if !isExitError && outFlags.ConfirmExit {
-			out.Print(locale.T("confirm_exit_on_error_prompt"))
-			br := bufio.NewReader(os.Stdin)
-			br.ReadLine()
 		}
 	}
 }
 
-func run(args []string, isInteractive bool, cfg *config.Instance, out output.Outputer) (rerr error) {
+func run(args []string, cfg *config.Instance, out output.Outputer) (rerr error) {
 	defer profile.Measure("main:run", time.Now())
 
 	// Set up profiling
@@ -128,7 +129,7 @@ func run(args []string, isInteractive bool, cfg *config.Instance, out output.Out
 		if err != nil {
 			return err
 		}
-		defer cleanup()
+		defer rtutils.Closer(cleanup, &rerr)
 	}
 
 	logging.CurrentHandler().SetVerbose(os.Getenv("VERBOSE") != "" || argsHaveVerbose(args))
@@ -143,16 +144,55 @@ func run(args []string, isInteractive bool, cfg *config.Instance, out output.Out
 
 	ipcClient := svcctl.NewDefaultIPCClient()
 	argText := strings.Join(args, " ")
-	svcPort, err := svcctl.EnsureExecStartedAndLocateHTTP(ipcClient, svcExec, argText)
+	svcPort, err := svcctl.EnsureExecStartedAndLocateHTTP(ipcClient, svcExec, argText, out)
 	if err != nil {
 		return locale.WrapError(err, "start_svc_failed", "Failed to start state-svc at state tool invocation")
 	}
 
 	svcmodel := model.NewSvcModel(svcPort)
 
+	// Amend Rollbar data to also send the state-svc log tail. This cannot be done inside the rollbar
+	// package itself because importing pkg/platform/model creates an import cycle.
+	rollbar.AddLogDataAmender(func(logData string) string {
+		ctx, cancel := context.WithTimeout(context.Background(), model.SvcTimeoutMinimal)
+		defer cancel()
+		svcLogData, err := svcmodel.FetchLogTail(ctx)
+		if err != nil {
+			svcLogData = fmt.Sprintf("Could not fetch state-svc log: %v", err)
+		}
+		logData += "\nstate-svc log:\n"
+		if len(svcLogData) == logging.TailSize {
+			logData += "<truncated>\n"
+		}
+		logData += svcLogData
+		return logData
+	})
+
+	auth := authentication.New(cfg)
+	defer events.Close("auth", auth.Close)
+
+	if auth.AvailableAPIToken() != "" {
+		jwt, err := svcmodel.GetJWT(context.Background())
+		if err != nil {
+			multilog.Critical("Could not get JWT: %v", errs.JoinMessage(err))
+		}
+		if err != nil || jwt == nil {
+			// Could not authenticate; user got logged out
+			auth.Logout()
+		} else {
+			auth.UpdateSession(jwt)
+		}
+	}
+
+	projectfile.RegisterMigrator(migrator.NewMigrator(auth, cfg, svcmodel))
+
 	// Retrieve project file
+	if os.Getenv("ACTIVESTATE_PROJECT") != "" {
+		out.Notice(locale.T("warning_activestate_project_env_var"))
+	}
 	pjPath, err := projectfile.GetProjectFilePath()
-	if err != nil && errs.Matches(err, &projectfile.ErrorNoProjectFromEnv{}) {
+	var errNoProjectFromEnv *projectfile.ErrorNoProjectFromEnv
+	if err != nil && errors.As(err, &errNoProjectFromEnv) {
 		// Fail if we are meant to inherit the projectfile from the environment, but the file doesn't exist
 		return err
 	}
@@ -175,14 +215,7 @@ func run(args []string, isInteractive bool, cfg *config.Instance, out output.Out
 		pjNamespace = pj.Namespace().String()
 	}
 
-	auth := authentication.New(cfg)
-	defer events.Close("auth", auth.Close)
-
-	if err := auth.Sync(); err != nil {
-		logging.Warning("Could not sync authenticated state: %s", err.Error())
-	}
-
-	an := anAsync.New(svcmodel, cfg, auth, out, pjNamespace)
+	an := anAsync.New(anaConst.SrcStateTool, svcmodel, cfg, auth, out, pjNamespace)
 	defer func() {
 		if err := events.WaitForEvents(time.Second, an.Wait); err != nil {
 			logging.Warning("Failed waiting for events: %v", err)
@@ -190,53 +223,49 @@ func run(args []string, isInteractive bool, cfg *config.Instance, out output.Out
 	}()
 
 	// Set up prompter
-	prompter := prompt.New(isInteractive, an)
+	prompter := prompt.New(out, an)
 
 	// Set up conditional, which accesses a lot of primer data
 	sshell := subshell.New(cfg)
 
 	conditional := constraints.NewPrimeConditional(auth, pj, sshell.Shell())
 	project.RegisterConditional(conditional)
-	project.RegisterExpander("mixin", project.NewMixin(auth).Expander)
-	project.RegisterExpander("secrets", project.NewSecretPromptingExpander(secretsapi.Get(), prompter, cfg))
+	if err := project.RegisterExpander("mixin", project.NewMixin(auth).Expander); err != nil {
+		logging.Debug("Could not register mixin expander: %v", err)
+	}
+
+	if err := project.RegisterExpander("secrets", project.NewSecretPromptingExpander(secretsapi.Get(auth), prompter, cfg, auth)); err != nil {
+		logging.Debug("Could not register secrets expander: %v", err)
+	}
 
 	// Run the actual command
 	cmds := cmdtree.New(primer.New(pj, out, auth, prompter, sshell, conditional, cfg, ipcClient, svcmodel, an), args...)
 
-	childCmd, err := cmds.Command().Find(args[1:])
+	childCmd, err := cmds.Command().FindChild(args[1:])
 	if err != nil {
 		logging.Debug("Could not find child command, error: %v", err)
 	}
 
-	if childCmd != nil && !childCmd.SkipChecks() {
-		// Auto update to latest state tool version
-		if updated, err := autoUpdate(args, cfg, out); err != nil || updated {
-			return err
-		}
+	notifier := notifier.New(out, svcmodel)
+	cmds.OnExecStart(notifier.OnExecStart)
+	cmds.OnExecStop(notifier.OnExecStop)
 
-		// Check for deprecation
-		deprecationInfo, err := svcmodel.CheckDeprecation(context.Background())
-		if err != nil {
-			multilog.Error("Could not check for deprecation: %s", err.Error())
-		}
-		if deprecationInfo != nil {
-			if !deprecationInfo.DateReached {
-				out.Notice(output.Heading(locale.Tl("deprecation_title", "Deprecation Warning")))
-				out.Notice(locale.Tr("warn_deprecation", deprecationInfo.Date, deprecationInfo.Reason))
-			} else {
-				return locale.NewInputError("err_deprecation", "You are running a version of the State Tool that is no longer supported! Reason: {{.V1}}", deprecationInfo.Date, deprecationInfo.Reason)
-			}
-		}
+	// Auto update to latest state tool version if possible.
+	if updated, err := autoUpdate(svcmodel, args, childCmd, cfg, an, out); err == nil && updated {
+		return nil // command will be run by updated exe
+	} else if err != nil {
+		multilog.Error("Failed to autoupdate: %v", err)
+	}
 
-		if childCmd.Name() != "update" && pj != nil && pj.IsLocked() {
-			if (pj.Version() != "" && pj.Version() != constants.Version) ||
-				(pj.VersionBranch() != "" && pj.VersionBranch() != constants.BranchName) {
-				return errs.AddTips(
-					locale.NewInputError("lock_version_mismatch", "", pj.Source().Lock, constants.BranchName, constants.Version),
-					locale.Tl("lock_update_legacy_version", "", constants.DocumentationURLLocking),
-					locale.T("lock_update_lock"),
-				)
-			}
+	// Check to see if this state tool version is different from the lock version.
+	if (childCmd == nil || !childCmd.SkipChecks()) && pj != nil && pj.IsLocked() {
+		if (pj.Version() != "" && pj.Version() != constants.Version) ||
+			(pj.Channel() != "" && pj.Channel() != constants.ChannelName) {
+			return errs.AddTips(
+				locale.NewInputError("lock_version_mismatch", "", pj.Source().Lock, constants.ChannelName, constants.Version),
+				locale.Tr("lock_update_legacy_version", constants.DocumentationURLLocking),
+				locale.T("lock_update_lock"),
+			)
 		}
 	}
 
@@ -244,10 +273,12 @@ func run(args []string, isInteractive bool, cfg *config.Instance, out output.Out
 	if err != nil {
 		cmdName := ""
 		if childCmd != nil {
-			cmdName = childCmd.UseFull() + " "
+			cmdName = childCmd.JoinedSubCommandNames() + " "
 		}
-		err = errs.AddTips(err, locale.Tl("err_tip_run_help", "Run → [ACTIONABLE]`state {{.V0}}--help`[/RESET] for general help", cmdName))
-		cmdletErrors.ReportError(err, cmds.Command(), an)
+		if !out.Type().IsStructured() {
+			err = errs.AddTips(err, locale.Tl("err_tip_run_help", "Run → '[ACTIONABLE]state {{.V0}}--help[/RESET]' for general help", cmdName))
+		}
+		runbits_errors.ReportError(err, cmds.Command(), an)
 	}
 
 	return err

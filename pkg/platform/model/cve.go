@@ -22,24 +22,27 @@ func FetchProjectVulnerabilities(auth *authentication.Auth, org, project string)
 	// This should be removed by https://www.pivotaltracker.com/story/show/176508740
 	if !auth.Authenticated() {
 		return nil, errs.AddTips(
-			locale.NewError("cve_needs_authentication", "You need to be authenticated in order to access vulnerability information about your project."),
-			locale.Tl("auth_tip", "Run `state auth` to authenticate."),
+			locale.NewError("cve_needs_authentication"),
+			locale.T("auth_tip"),
 		)
 	}
 	req := request.VulnerabilitiesByProject(org, project)
-	var resp model.ProjectResponse
+	var resp model.ProjectVulnerabilities
 	med := mediator.New(auth)
 	err := med.Run(req, &resp)
 	if err != nil {
 		return nil, errs.Wrap(err, "Failed to run mediator request.")
 	}
 
-	msg := resp.ProjectVulnerabilities.Message
+	msg := resp.Message
 	if msg != nil {
+		if resp.TypeName == "NotFound" {
+			return nil, &ErrProjectNotFound{org, project}
+		}
 		return nil, locale.NewError("project_vulnerability_err", "Request to retrieve vulnerability information failed with error: {{.V0}}", *msg)
 	}
 
-	return &resp.ProjectVulnerabilities, nil
+	return &resp, nil
 }
 
 // FetchCommitVulnerabilities returns the vulnerability information of a project
@@ -47,12 +50,12 @@ func FetchCommitVulnerabilities(auth *authentication.Auth, commitID string) (*mo
 	// This should be removed by https://www.pivotaltracker.com/story/show/176508740
 	if !auth.Authenticated() {
 		return nil, errs.AddTips(
-			locale.NewError("cve_needs_authentication", "You need to be authenticated in order to access vulnerability information about your project."),
-			locale.Tl("auth_tip", "Run `state auth` to authenticate."),
+			locale.NewError("cve_needs_authentication"),
+			locale.T("auth_tip"),
 		)
 	}
 	req := request.VulnerabilitiesByCommit(commitID)
-	var resp model.CommitResponse
+	var resp model.CommitVulnerabilities
 	med := mediator.New(auth)
 	err := med.Run(req, &resp)
 	if err != nil {
@@ -64,7 +67,7 @@ func FetchCommitVulnerabilities(auth *authentication.Auth, commitID string) (*mo
 		return nil, locale.NewError("commit_vulnerability_err", "Request to retrieve vulnerability information for commit {{.V0}} failed with error: {{.V1}}", commitID, *msg)
 	}
 
-	return removeModerateSeverity(resp.CommitVulnerabilities), nil
+	return removeModerateSeverity(resp), nil
 }
 
 func removeModerateSeverity(cv model.CommitVulnerabilities) *model.CommitVulnerabilities {

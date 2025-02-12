@@ -11,7 +11,7 @@ const (
 	InputObject DefinitionKind = "INPUT_OBJECT"
 )
 
-// ObjectDefinition is the core type definition object, it includes all of the definable types
+// Definition is the core type definition object, it includes all of the definable types
 // but does *not* cover schema or directives.
 //
 // @vektah: Javascript implementation has different types for all of these, but they are
@@ -31,6 +31,10 @@ type Definition struct {
 
 	Position *Position `dump:"-"`
 	BuiltIn  bool      `dump:"-"`
+
+	BeforeDescriptionComment *CommentGroup
+	AfterDescriptionComment  *CommentGroup
+	EndOfDefinitionComment   *CommentGroup
 }
 
 func (d *Definition) IsLeafType() bool {
@@ -66,6 +70,9 @@ type FieldDefinition struct {
 	Type         *Type
 	Directives   DirectiveList
 	Position     *Position `dump:"-"`
+
+	BeforeDescriptionComment *CommentGroup
+	AfterDescriptionComment  *CommentGroup
 }
 
 type ArgumentDefinition struct {
@@ -75,6 +82,9 @@ type ArgumentDefinition struct {
 	Type         *Type
 	Directives   DirectiveList
 	Position     *Position `dump:"-"`
+
+	BeforeDescriptionComment *CommentGroup
+	AfterDescriptionComment  *CommentGroup
 }
 
 type EnumValueDefinition struct {
@@ -82,12 +92,19 @@ type EnumValueDefinition struct {
 	Name        string
 	Directives  DirectiveList
 	Position    *Position `dump:"-"`
+
+	BeforeDescriptionComment *CommentGroup
+	AfterDescriptionComment  *CommentGroup
 }
 
 type DirectiveDefinition struct {
-	Description string
-	Name        string
-	Arguments   ArgumentDefinitionList
-	Locations   []DirectiveLocation
-	Position    *Position `dump:"-"`
+	Description  string
+	Name         string
+	Arguments    ArgumentDefinitionList
+	Locations    []DirectiveLocation
+	IsRepeatable bool
+	Position     *Position `dump:"-"`
+
+	BeforeDescriptionComment *CommentGroup
+	AfterDescriptionComment  *CommentGroup
 }

@@ -52,7 +52,7 @@ function download([string] $url, [string] $out)
     {
         try
         {
-            $downloader = new-object System.Net.WebClient
+            $downloader = New-Object System.Net.WebClient
             if ($out -eq "")
             {
                 return $downloader.DownloadString($url)
@@ -66,13 +66,47 @@ function download([string] $url, [string] $out)
         {
             if ($Retrycount -gt 5)
             {
-                Write-Error "Could not download after 5 retries."
-                throw $_
+                $exception = $_.Exception
+                $errorMessage = ""
+
+                if ($exception -is [System.Management.Automation.MethodInvocationException] -and $exception.InnerException -is [System.Net.WebException])
+                {
+                    $webException = [System.Net.WebException]$exception.InnerException
+                    $response = $webException.Response
+
+                    if ($response -ne $null)
+                    {
+                        $responseStream = $response.GetResponseStream()
+                        $reader = New-Object System.IO.StreamReader($responseStream)
+                        $responseBody = $reader.ReadToEnd()
+                        $reader.Close()
+                        $responseStream.Close()
+
+                        try
+                        {
+                            $errorMessage = (ConvertFrom-Json $responseBody).message
+                        }
+                        catch
+                        {
+                            $errorMessage = $responseBody
+                        }
+                    }
+                    else
+                    {
+                        $errorMessage = $webException.Message
+                    }
+                }
+                else
+                {
+                    $errorMessage = $exception.Message
+                }
+
+                Write-Error "Could not download after 5 retries. Received error: $errorMessage"
+                throw $exception
             }
             else
             {
                 Write-Host "Could not download, retrying..."
-                Write-Host $_
                 $Retrycount = $Retrycount + 1
             }
         }
@@ -113,15 +147,74 @@ function error([string] $msg)
     Write-Host $msg -ForegroundColor Red
 }
 
-if (!$script:VERSION) {
-  # Determine the latest version to fetch and parse info.
-  $jsonURL = "$script:BASEINFOURL/?channel=$script:CHANNEL&platform=windows&source=install"
-  $infoJson = ConvertFrom-Json -InputObject (download $jsonURL)
-  $version = $infoJson.Version
-  $checksum = $infoJson.Sha256
-  $relUrl = $infoJson.Path
+function setShellOverride
+{
+    # Walk up the process tree to find cmd.exe
+    # If we encounter it we set the shell override
+    $currentPid = $PID
+    while ($currentPid -ne 0)
+    {
+        $process = Get-WmiObject Win32_Process | Where-Object { $_.ProcessId -eq $currentPid }
+        if (!$process) { break }
+
+        if ($process.Name -eq "cmd" -or $process.Name -eq "cmd.exe")
+        {
+            [System.Environment]::SetEnvironmentVariable("ACTIVESTATE_CLI_SHELL_OVERRIDE", $process.Name, "Process")
+            break
+        }
+
+        $currentPid = $process.ParentProcessId
+    }
+}
+
+$version = $script:VERSION
+if (!$version) {
+    # If the user did not specify a version, formulate a query to fetch the JSON info of the latest
+    # version, including where it is.
+    $jsonURL = "$script:BASEINFOURL/?channel=$script:CHANNEL&platform=windows&source=install"
+} elseif (!($version | Select-String -Pattern "-SHA" -SimpleMatch)) {
+    # If the user specified a partial version (i.e. no SHA), formulate a query to fetch the JSON
+    # info of that version's latest SHA, including where it is.
+    $versionNoSHA = $version
+    $version = ""
+    $jsonURL = "$script:BASEINFOURL/?channel=$script:CHANNEL&platform=windows&source=install&target-version=$versionNoSHA"
 } else {
-  $relUrl = "$script:CHANNEL/$script:VERSION/windows-amd64/state-windows-amd64-$script:VERSION.zip"
+    # If the user specified a full version with SHA, formulate a query to fetch the JSON info of
+    # that version.
+    $versionNoSHA = $version -replace "-SHA.*", ""
+    $jsonURL = "$script:BASEINFOURL/?channel=$script:CHANNEL&platform=windows&source=install&target-version=$versionNoSHA"
+}
+
+# Fetch version info.
+try {
+    $infoJson = ConvertFrom-Json -InputObject (download $jsonURL)
+} catch [System.Exception] {
+}
+if (!$infoJson) {
+    if (!$version) {
+        Write-Error "Unable to retrieve the latest version number"
+    } else {
+        Write-Error "Could not download a State Tool Installer for the given command line arguments"
+    }
+    Write-Error $_.Exception.Message
+    exit 1
+}
+
+# Extract checksum.
+$checksum = $infoJson.Sha256
+
+if (!$version) {
+    # If the user specified no version or a partial version we need to use the json URL to get the
+    # actual installer URL.
+    $version = $infoJson.Version
+    $relUrl = $infoJson.Path
+} else {
+    # If the user specified a full version, construct the installer URL.
+    if ($version -ne $infoJson.Version) {
+        Write-Error "Unknown version: $version"
+        exit 1
+    }
+    $relUrl = "$script:CHANNEL/$versionNoSHA/windows-amd64/state-windows-amd64-$version.zip"
 }
 
 # Fetch the requested or latest version.
@@ -142,9 +235,9 @@ catch [System.Exception]
     exit 1
 }
 
-# Verify checksum if possible.
+# Verify checksum.
 $hash = (Get-FileHash -Path $zipPath -Algorithm SHA256).Hash
-if ($checksum -and $hash -ne $checksum)
+if ($hash -ne $checksum)
 {
     Write-Warning "SHA256 sum did not match:"
     Write-Warning "Expected: $checksum"
@@ -175,6 +268,7 @@ $PSDefaultParameterValues['*:Encoding'] = 'utf8'
 
 # Run the installer.
 $env:ACTIVESTATE_SESSION_TOKEN = $script:SESSION_TOKEN_VALUE
+setShellOverride
 & $exePath $args --source-installer="install.ps1"
 $success = $?
 if (Test-Path env:ACTIVESTATE_SESSION_TOKEN)
@@ -182,5 +276,5 @@ if (Test-Path env:ACTIVESTATE_SESSION_TOKEN)
     Remove-Item Env:\ACTIVESTATE_SESSION_TOKEN
 }
 if ( !$success ) {
-  exit 1
+    exit 1
 }

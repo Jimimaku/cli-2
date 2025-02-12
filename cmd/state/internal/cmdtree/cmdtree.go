@@ -3,7 +3,7 @@ package cmdtree
 import (
 	"time"
 
-	"github.com/ActiveState/cli/cmd/state/internal/cmdtree/intercepts/cmdcall"
+	"github.com/ActiveState/cli/cmd/state/internal/cmdtree/exechandlers/cmdcall"
 	"github.com/ActiveState/cli/internal/captain"
 	"github.com/ActiveState/cli/internal/condition"
 	"github.com/ActiveState/cli/internal/locale"
@@ -37,9 +37,14 @@ func New(prime *primer.Values, args ...string) *CmdTree {
 		newOpenCommand(prime),
 	)
 
+	deptree := newExportDepTreeCommand(prime)
+	deptree.AddChildren(
+		newExportDepTreeArtifactsCommand(prime),
+		newExportDepTreeIngredientsCommand(prime),
+	)
+
 	exportCmd := newExportCommand(prime)
 	exportCmd.AddChildren(
-		newRecipeCommand(prime),
 		newJWTCommand(prime),
 		newPrivateKeyCommand(prime),
 		newAPIKeyCommand(prime),
@@ -47,6 +52,10 @@ func New(prime *primer.Values, args ...string) *CmdTree {
 		newExportGithubActionCommand(prime),
 		newExportDocsCommand(prime),
 		newExportEnvCommand(prime),
+		newExportLogCommand(prime),
+		newExportRuntimeCommand(prime),
+		newExportBuildPlanCommand(prime),
+		deptree,
 	)
 
 	platformsCmd := newPlatformsCommand(prime)
@@ -62,13 +71,16 @@ func New(prime *primer.Values, args ...string) *CmdTree {
 	)
 
 	languagesCmd := newLanguagesCommand(prime)
-	languagesCmd.AddChildren(newLanguageInstallCommand(prime))
+	languagesCmd.AddChildren(
+		newLanguageInstallCommand(prime),
+		newLanguageSearchCommand(prime),
+	)
 
 	cleanCmd := newCleanCommand(prime)
 	cleanCmd.AddChildren(
 		newCleanUninstallCommand(prime, globals),
-		newCleanCacheCommand(prime, globals),
-		newCleanConfigCommand(prime),
+		newCleanCacheCommand(prime),
+		newCleanConfigCommand(prime, globals),
 	)
 
 	deployCmd := newDeployCommand(prime)
@@ -79,9 +91,6 @@ func New(prime *primer.Values, args ...string) *CmdTree {
 		newDeployReportCommand(prime),
 		newDeployUninstallCommand(prime),
 	)
-
-	tutorialCmd := newTutorialCommand(prime)
-	tutorialCmd.AddChildren(newTutorialProjectCommand(prime))
 
 	eventsCmd := newEventsCommand(prime)
 	eventsCmd.AddChildren(newEventsLogCommand(prime))
@@ -110,7 +119,7 @@ func New(prime *primer.Values, args ...string) *CmdTree {
 		newBundlesSearchCommand(prime),
 	)
 
-	secretsClient := secretsapi.InitializeClient()
+	secretsClient := secretsapi.InitializeClient(prime.Auth())
 	secretsCmd := newSecretsCommand(secretsClient, prime)
 	secretsCmd.AddChildren(
 		newSecretsGetCommand(prime),
@@ -119,7 +128,12 @@ func New(prime *primer.Values, args ...string) *CmdTree {
 	)
 
 	projectsCmd := newProjectsCommand(prime)
-	projectsCmd.AddChildren(newRemoteProjectsCommand(prime))
+	projectsCmd.AddChildren(
+		newRemoteProjectsCommand(prime),
+		newProjectsEditCommand(prime),
+		newDeleteProjectsCommand(prime),
+		newMoveProjectsCommand(prime),
+	)
 
 	updateCmd := newUpdateCommand(prime)
 	updateCmd.AddChildren(
@@ -143,14 +157,22 @@ func New(prime *primer.Values, args ...string) *CmdTree {
 
 	useCmd := newUseCommand(prime)
 	useCmd.AddChildren(
-		newUseResetCommand(prime, globals),
+		newUseResetCommand(prime),
 		newUseShowCommand(prime),
 	)
 
 	shellCmd := newShellCommand(prime)
 
+	refreshCmd := newRefreshCommand(prime)
+
+	artifactsCmd := newArtifactsCommand(prime)
+	artifactsCmd.AddChildren(
+		newArtifactsDownloadCommand(prime),
+	)
+
 	stateCmd := newStateCommand(globals, prime)
 	stateCmd.AddChildren(
+		newHelloCommand(prime),
 		newActivateCommand(prime),
 		newInitCommand(prime),
 		newPushCommand(prime),
@@ -178,14 +200,12 @@ func New(prime *primer.Values, args ...string) *CmdTree {
 		newPullCommand(prime, globals),
 		updateCmd,
 		newForkCommand(prime),
-		newPpmCommand(prime),
 		newInviteCommand(prime),
-		tutorialCmd,
 		prepareCmd,
 		newProtocolCommand(prime),
 		newExecCommand(prime, args...),
-		newRevertCommand(prime, globals),
-		newResetCommand(prime, globals),
+		newRevertCommand(prime),
+		newResetCommand(prime),
 		secretsCmd,
 		branchCmd,
 		newLearnCommand(prime),
@@ -193,7 +213,15 @@ func New(prime *primer.Values, args ...string) *CmdTree {
 		checkoutCmd,
 		useCmd,
 		shellCmd,
+		refreshCmd,
 		newSwitchCommand(prime),
+		newTestCommand(prime),
+		newCommitCommand(prime),
+		newPublish(prime),
+		newEvalCommand(prime),
+		newManifestCommmand(prime),
+		artifactsCmd,
+		newUpgradeCommand(prime),
 	)
 
 	return &CmdTree{
@@ -206,6 +234,7 @@ type globalOptions struct {
 	Output         string
 	Monochrome     bool
 	NonInteractive bool
+	Force          bool
 }
 
 // Group instances are used to group command help output.
@@ -215,9 +244,10 @@ var (
 	ProjectUsageGroup     = captain.NewCommandGroup(locale.Tl("group_project_usages", "Project Usage"), 8)
 	PackagesGroup         = captain.NewCommandGroup(locale.Tl("group_packages", "Package Management"), 7)
 	PlatformGroup         = captain.NewCommandGroup(locale.Tl("group_tools", "Platform"), 6)
-	VCSGroup              = captain.NewCommandGroup(locale.Tl("group_vcs", "Version Control"), 5)
-	AutomationGroup       = captain.NewCommandGroup(locale.Tl("group_automation", "Automation"), 4)
-	UtilsGroup            = captain.NewCommandGroup(locale.Tl("group_utils", "Utilities"), 3)
+	AuthorGroup           = captain.NewCommandGroup(locale.Tl("group_author", "Author"), 5)
+	VCSGroup              = captain.NewCommandGroup(locale.Tl("group_vcs", "Version Control"), 4)
+	AutomationGroup       = captain.NewCommandGroup(locale.Tl("group_automation", "Automation"), 3)
+	UtilsGroup            = captain.NewCommandGroup(locale.Tl("group_utils", "Utilities"), 2)
 )
 
 func newGlobalOptions() *globalOptions {
@@ -226,6 +256,7 @@ func newGlobalOptions() *globalOptions {
 
 func newStateCommand(globals *globalOptions, prime *primer.Values) *captain.Command {
 	opts := state.NewOptions()
+	var help bool
 
 	runner := state.New(opts, prime)
 	cmd := captain.NewCommand(
@@ -264,35 +295,43 @@ func newStateCommand(globals *globalOptions, prime *primer.Values) *captain.Comm
 				Shorthand:   "o",
 				Description: locale.T("flag_state_output_description"),
 				Persist:     true,
-				Value:       &globals.Output,
-			},
-			{
-				/* This option is only used for the vscode extension: It prevents the integrated terminal to close immediately after an error occurs, such that the user can read the message */
-				Name:        "confirm-exit-on-error", // Name and Shorthand should be kept in sync with cmd/state/output.go
-				Description: "prompts the user to press enter before exiting, when an error occurs",
-				Persist:     true,
-				Hidden:      true, // No need to add this to help messages
-				Value:       &opts.ConfirmExit,
+				OnUse: func() {
+					if prime.Output().Type().IsStructured() {
+						globals.NonInteractive = true
+					}
+				},
+				Value: &globals.Output,
 			},
 			{
 				Name:        "non-interactive", // Name and Shorthand should be kept in sync with cmd/state/output.go
 				Description: locale.T("flag_state_non_interactive_description"),
 				Shorthand:   "n",
 				Persist:     true,
+				OnUse:       func() { prime.Prompt().SetInteractive(false) },
 				Value:       &globals.NonInteractive,
+			},
+			{
+				Name:        "force",
+				Description: locale.T("flag_state_force_description"),
+				Persist:     true,
+				OnUse:       func() { prime.Prompt().SetForce(true) },
+				Value:       &globals.Force,
 			},
 			{
 				Name:        "version",
 				Description: locale.T("flag_state_version_description"),
 				Value:       &opts.Version,
 			},
+			{
+				Name:        "help",
+				Description: locale.Tl("flag_help", "Help for this command"),
+				Shorthand:   "h",
+				Persist:     true,
+				Value:       &help, // need to store the value somewhere, but Cobra handles this flag by itself
+			},
 		},
 		[]*captain.Argument{},
 		func(ccmd *captain.Command, args []string) error {
-			if globals.Verbose {
-				logging.CurrentHandler().SetVerbose(true)
-			}
-
 			return runner.Run(ccmd.Usage)
 		},
 	)
@@ -300,7 +339,9 @@ func newStateCommand(globals *globalOptions, prime *primer.Values) *captain.Comm
 	cmdCall := cmdcall.New(prime)
 
 	cmd.SetHasVariableArguments()
-	cmd.SetInterceptChain(cmdCall.InterceptExec)
+	cmd.OnExecStart(cmdCall.OnExecStart)
+	cmd.OnExecStop(cmdCall.OnExecStop)
+	cmd.SetSupportsStructuredOutput()
 
 	return cmd
 }
@@ -309,6 +350,14 @@ func newStateCommand(globals *globalOptions, prime *primer.Values) *captain.Comm
 func (ct *CmdTree) Execute(args []string) error {
 	defer profile.Measure("cmdtree:Execute", time.Now())
 	return ct.cmd.Execute(args)
+}
+
+func (ct *CmdTree) OnExecStart(handler captain.ExecEventHandler) {
+	ct.cmd.OnExecStart(handler)
+}
+
+func (ct *CmdTree) OnExecStop(handler captain.ExecEventHandler) {
+	ct.cmd.OnExecStop(handler)
 }
 
 // Command returns the root command of the CmdTree
@@ -332,7 +381,7 @@ func (a *addCmdAs) deprecatedAlias(aliased *captain.Command, name string) {
 		func(c *captain.Command, args []string) error {
 			msg := locale.Tl(
 				"cmd_deprecated_notice",
-				"This command is deprecated. Please use `state {{.V0}}` instead.",
+				"This command is deprecated. Please use '[ACTIONABLE]state {{.V0}}[/RESET]' instead.",
 				aliased.Name(),
 			)
 

@@ -5,6 +5,7 @@ import (
 	"github.com/ActiveState/cli/internal/logging"
 	"github.com/ActiveState/cli/internal/output"
 	"github.com/ActiveState/cli/internal/primer"
+	"github.com/ActiveState/cli/internal/runbits/rationalize"
 	"github.com/ActiveState/cli/pkg/platform/model"
 	"github.com/ActiveState/cli/pkg/project"
 )
@@ -34,16 +35,22 @@ func (l *List) Run() error {
 	logging.Debug("ExecuteList")
 
 	if l.project == nil {
-		return locale.NewInputError("err_no_project")
+		return rationalize.ErrNoProject
 	}
 
-	project, err := model.FetchProjectByName(l.project.Owner(), l.project.Name())
+	project, err := model.LegacyFetchProjectByName(l.project.Owner(), l.project.Name())
 	if err != nil {
 		return locale.WrapError(err, "err_fetch_project", "", l.project.Namespace().String())
 	}
 
-	tree := NewBranchOutput(project.Branches, l.project.BranchName())
-	l.out.Print(tree)
+	l.out.Print(output.Prepare(
+		branchTree(project.Branches, l.project.BranchName()),
+		project.Branches,
+	))
+
+	if len(project.Branches) > 1 {
+		l.out.Notice(locale.Tl("branch_switch_notice", "To switch to another branch, run '[ACTIONABLE]state branch switch <name>[/RESET]'."))
+	}
 
 	return nil
 }

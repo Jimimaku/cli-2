@@ -2,9 +2,11 @@ package rtwatcher
 
 import (
 	"encoding/json"
+	"errors"
 	"os"
 	"runtime/debug"
 	"strconv"
+	"strings"
 	"time"
 
 	anaConst "github.com/ActiveState/cli/internal/analytics/constants"
@@ -14,7 +16,7 @@ import (
 	"github.com/ActiveState/cli/internal/errs"
 	"github.com/ActiveState/cli/internal/logging"
 	"github.com/ActiveState/cli/internal/multilog"
-	"github.com/ActiveState/cli/internal/rtutils/p"
+	"github.com/ActiveState/cli/internal/rtutils/ptr"
 	"github.com/ActiveState/cli/internal/runbits/panics"
 )
 
@@ -30,7 +32,7 @@ type Watcher struct {
 }
 
 type analytics interface {
-	Event(category string, action string, dim ...*dimensions.Values)
+	EventWithSource(category, action, source string, dim ...*dimensions.Values)
 }
 
 func New(cfg *config.Instance, an analytics) *Watcher {
@@ -60,7 +62,7 @@ func New(cfg *config.Instance, an analytics) *Watcher {
 }
 
 func (w *Watcher) ticker(cb func()) {
-	defer panics.LogPanics(recover(), debug.Stack())
+	defer func() { panics.LogPanics(recover(), debug.Stack()) }()
 
 	logging.Debug("Starting watcher ticker with interval %s", w.interval.String())
 	ticker := time.NewTicker(w.interval)
@@ -80,7 +82,8 @@ func (w *Watcher) check() {
 	for i := range w.watching {
 		e := w.watching[i] // Must use index, because we are deleting indexes further down
 		running, err := e.IsRunning()
-		if err != nil {
+		var errProcess *processError
+		if err != nil && !errors.As(err, &errProcess) {
 			multilog.Error("Could not check if runtime process is running: %s", errs.JoinMessage(err))
 			// Don't return yet, the conditional below still needs to clear this entry
 		}
@@ -97,7 +100,32 @@ func (w *Watcher) check() {
 
 func (w *Watcher) RecordUsage(e entry) {
 	logging.Debug("Recording usage of %s (%d)", e.Exec, e.PID)
-	w.an.Event(anaConst.CatRuntimeUsage, anaConst.ActRuntimeHeartbeat, e.Dims)
+	w.an.EventWithSource(anaConst.CatRuntimeUsage, anaConst.ActRuntimeHeartbeat, e.Source, e.Dims)
+}
+
+func (w *Watcher) GetProcessesInUse(execDir string) []entry {
+	inUse := make([]entry, 0)
+
+	execDir = strings.ToLower(execDir) // match case-insensitively
+	for _, proc := range w.watching {
+		if !strings.Contains(strings.ToLower(proc.Exec), execDir) {
+			continue
+		}
+		isRunning, err := proc.IsRunning()
+		var errProcess *processError
+		if err != nil && !errors.As(err, &errProcess) {
+			multilog.Error("Could not check if runtime process is running: %s", errs.JoinMessage(err))
+			// Any errors should not affect fetching which processes are currently in use. We just won't
+			// include this one in the list.
+		}
+		if !isRunning {
+			logging.Debug("Runtime process %d:%s is not running", proc.PID, proc.Exec)
+			continue
+		}
+		inUse = append(inUse, proc) // append a copy
+	}
+
+	return inUse
 }
 
 func (w *Watcher) Close() error {
@@ -116,9 +144,10 @@ func (w *Watcher) Close() error {
 	return nil
 }
 
-func (w *Watcher) Watch(pid int, exec string, dims *dimensions.Values) {
+func (w *Watcher) Watch(pid int, exec, source string, dims *dimensions.Values) {
 	logging.Debug("Watching %s (%d)", exec, pid)
-	dims.Sequence = p.IntP(-1) // sequence is meaningless for heartbeat events
-	e := entry{pid, exec, dims}
+	dims.Sequence = ptr.To(-1) // sequence is meaningless for heartbeat events
+	e := entry{pid, exec, source, dims}
 	w.watching = append(w.watching, e)
+	go w.RecordUsage(e) // initial event
 }

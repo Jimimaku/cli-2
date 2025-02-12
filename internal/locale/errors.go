@@ -2,20 +2,27 @@ package locale
 
 import (
 	"errors"
+	"fmt"
 	"strings"
 
+	"github.com/ActiveState/cli/internal/condition"
+	"github.com/ActiveState/cli/internal/errs"
+	"github.com/ActiveState/cli/internal/multilog"
 	"github.com/ActiveState/cli/internal/osutils/stacktrace"
 	"github.com/ActiveState/cli/internal/rtutils"
 )
 
+var _ ErrorLocalizer = &LocalizedError{}
+
 // LocalizedError is an error that has the concept of user facing (localized) errors as well as whether an error is due
 // to user input or not
 type LocalizedError struct {
-	wrapped   error
-	tips      []string
-	localized string
-	stack     *stacktrace.Stacktrace
-	inputErr  bool
+	wrapped     error
+	tips        []string
+	localized   string
+	stack       *stacktrace.Stacktrace
+	inputErr    bool
+	externalErr bool
 }
 
 // Error is the error message
@@ -23,8 +30,8 @@ func (e *LocalizedError) Error() string {
 	return e.localized
 }
 
-// UserError is the user facing error message, it's the same as Error() but identifies it as being user facing
-func (e *LocalizedError) UserError() string {
+// LocaleError is the user facing error message, it's the same as Error() but identifies it as being user facing
+func (e *LocalizedError) LocaleError() string {
 	return e.localized
 }
 
@@ -47,13 +54,22 @@ func (e *LocalizedError) ErrorTips() []string {
 	return e.tips
 }
 
+func (e *LocalizedError) ExternalError() bool {
+	return e.externalErr
+}
+
 func (e *LocalizedError) AddTips(tips ...string) {
 	e.tips = append(e.tips, tips...)
 }
 
 // ErrorLocalizer represents a localized error
 type ErrorLocalizer interface {
-	UserError() string
+	error
+	LocaleError() string
+}
+
+type AsError interface {
+	As(interface{}) bool
 }
 
 // ErrorInput represents a user input error
@@ -127,12 +143,11 @@ func IsInputError(err error) bool {
 	if err == nil {
 		return false
 	}
-	for err != nil {
+	for _, err := range errs.Unpack(err) {
 		errInput, ok := err.(ErrorInput)
 		if ok && errInput.InputError() {
 			return true
 		}
-		err = errors.Unwrap(err)
 	}
 	return false
 }
@@ -149,34 +164,63 @@ func IsInputErrorNonRecursive(err error) bool {
 	return false
 }
 
-// JoinErrors joins all error messages in the Unwrap stack that are localized
-func JoinErrors(err error, sep string) *LocalizedError {
+// JoinedErrorMessage joins all error messages in the Unwrap stack that are localized
+func JoinedErrorMessage(err error) string {
 	var message []string
-	for err != nil {
-		if errr, ok := err.(ErrorLocalizer); ok {
-			message = append(message, errr.UserError())
+	for _, err := range UnpackError(err) {
+		if lerr, isLocaleError := err.(ErrorLocalizer); isLocaleError {
+			message = append(message, lerr.LocaleError())
 		}
-		err = errors.Unwrap(err)
 	}
-	return WrapError(err, "", strings.Join(message, sep))
+	if len(message) == 0 {
+		if !condition.BuiltViaCI() {
+			panic(fmt.Sprintf("Errors must be localized! Please localize: %s, called at: %s\n", errs.JoinMessage(err), stacktrace.Get()))
+		}
+		multilog.Error("MUST ADDRESS: Error does not have localization: %s", errs.JoinMessage(err))
+		return err.Error()
+	}
+	return strings.Join(message, ": ")
 }
 
 func ErrorMessage(err error) string {
 	if errr, ok := err.(ErrorLocalizer); ok {
-		return errr.UserError()
+		return errr.LocaleError()
 	}
 	return err.Error()
 }
 
-func UnwrapError(err error) []error {
-	var errs []error
-	for err != nil {
-		_, isLocaleError := err.(ErrorLocalizer)
+// UnpackError recursively unpacks the given error and returns all localized errors
+func UnpackError(err error) []error {
+	var errors []error
+	for _, err := range errs.Unpack(err) {
+		lerr, isLocaleError := err.(ErrorLocalizer)
 		if isLocaleError {
-			errs = append(errs, err)
+			errors = append(errors, lerr)
 		}
-		err = errors.Unwrap(err)
 	}
 
-	return errs
+	return errors
+}
+
+func NewExternalError(id string, args ...string) *LocalizedError {
+	return WrapExternalError(nil, id, args...)
+}
+
+func WrapExternalError(wrapTarget error, id string, args ...string) *LocalizedError {
+	locale := id
+	if len(args) > 0 {
+		locale, args = args[0], args[1:]
+	}
+	if locale == "" {
+		locale = id
+	}
+
+	l := &LocalizedError{}
+	translation := Tl(id, locale, args...)
+	l.externalErr = true
+	l.wrapped = wrapTarget
+	l.localized = translation
+	l.stack = stacktrace.GetWithSkip([]string{rtutils.CurrentFile()})
+
+	return l
 }

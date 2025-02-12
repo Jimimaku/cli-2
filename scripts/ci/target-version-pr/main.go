@@ -3,6 +3,7 @@ package main
 import (
 	"os"
 	"strconv"
+	"strings"
 
 	"github.com/ActiveState/cli/internal/errs"
 	wc "github.com/ActiveState/cli/scripts/internal/workflow-controllers"
@@ -24,15 +25,16 @@ type Meta struct {
 	Repo              *github.Repository
 	ActivePR          *github.PullRequest
 	ActiveStory       *jira.Issue
-	ActiveVersion     semver.Version
+	ActiveVersion     wh.Version
 	ActiveJiraVersion string
 	VersionPRName     string
-	VersionBranchName string
+	TargetBranchName  string
 	VersionPR         *github.PullRequest
+	IsVersionPR       bool
 }
 
 func (m Meta) GetVersion() semver.Version {
-	return m.ActiveVersion
+	return m.ActiveVersion.Version
 }
 
 func (m Meta) GetJiraVersion() string {
@@ -40,7 +42,7 @@ func (m Meta) GetJiraVersion() string {
 }
 
 func (m Meta) GetVersionBranchName() string {
-	return m.VersionBranchName
+	return m.TargetBranchName
 }
 
 func (m Meta) GetVersionPRName() string {
@@ -75,7 +77,7 @@ func run() error {
 	finish()
 
 	// Create version PR if it doesn't exist yet
-	if meta.VersionPR == nil && !meta.ActiveVersion.EQ(wh.VersionMaster) {
+	if !meta.IsVersionPR && meta.VersionPR == nil && !meta.ActiveVersion.EQ(wh.VersionMaster) {
 		finish = wc.PrintStart("Creating version PR for fixVersion %s", meta.ActiveVersion)
 		err := wc.CreateVersionPR(ghClient, jiraClient, meta)
 		if err != nil {
@@ -85,15 +87,36 @@ func run() error {
 	}
 
 	// Set the target branch for our PR
-	finish = wc.PrintStart("Setting target branch to %s", meta.VersionBranchName)
-	if os.Getenv("DRYRUN") != "true" {
-		if err := wh.UpdatePRTargetBranch(ghClient, meta.ActivePR.GetNumber(), meta.VersionBranchName); err != nil {
-			return errs.Wrap(err, "failed to update PR target branch")
-		}
+	finish = wc.PrintStart("Setting target branch to %s", meta.TargetBranchName)
+	if strings.HasSuffix(meta.ActivePR.GetBase().GetRef(), meta.TargetBranchName) {
+		wc.Print("PR already targets version branch %s", meta.TargetBranchName)
 	} else {
-		wc.Print("DRYRUN: would update PR target branch to %s", meta.VersionBranchName)
+		if os.Getenv("DRYRUN") != "true" {
+			if err := wh.UpdatePRTargetBranch(ghClient, meta.ActivePR.GetNumber(), meta.TargetBranchName); err != nil {
+				return errs.Wrap(err, "failed to update PR target branch")
+			}
+		} else {
+			wc.Print("DRYRUN: would update PR target branch to %s", meta.TargetBranchName)
+		}
 	}
 	finish()
+
+	// Set the fixVersion
+	if !meta.IsVersionPR {
+		finish = wc.PrintStart("Setting fixVersion to %s", meta.ActiveVersion)
+		if len(meta.ActiveStory.Fields.FixVersions) == 0 || meta.ActiveStory.Fields.FixVersions[0].ID != meta.ActiveVersion.JiraID {
+			if os.Getenv("DRYRUN") != "true" {
+				if err := wh.UpdateJiraFixVersion(jiraClient, meta.ActiveStory, meta.ActiveVersion.JiraID); err != nil {
+					return errs.Wrap(err, "failed to update Jira fixVersion")
+				}
+			} else {
+				wc.Print("DRYRUN: would set fixVersion to %s", meta.ActiveVersion.String())
+			}
+		} else {
+			wc.Print("Jira issue already has fixVersion %s", meta.ActiveVersion.String())
+		}
+		finish()
+	}
 
 	wc.Print("All Done")
 
@@ -110,6 +133,14 @@ func fetchMeta(ghClient *github.Client, jiraClient *jira.Client, prNumber int) (
 	wc.Print("PR retrieved: %s", prBeingHandled.GetTitle())
 	finish()
 
+	if wh.IsVersionBranch(prBeingHandled.Head.GetRef()) {
+		return Meta{
+			Repo:             &github.Repository{},
+			ActivePR:         prBeingHandled,
+			TargetBranchName: "beta",
+			IsVersionPR:      true,
+		}, nil
+	}
 	finish = wc.PrintStart("Extracting Jira Issue ID from Active PR: %s", prBeingHandled.GetTitle())
 	jiraIssueID, err := wh.ExtractJiraIssueID(prBeingHandled)
 	if err != nil {
@@ -145,16 +176,19 @@ func fetchMeta(ghClient *github.Client, jiraClient *jira.Client, prNumber int) (
 	var versionPRName string
 	var versionPR *github.PullRequest
 	if fixVersion.NE(wh.VersionMaster) {
-		versionPRName := wh.VersionedPRTitle(fixVersion)
+		versionPRName := wh.VersionedPRTitle(fixVersion.Version)
 
 		// Retrieve Relevant Fixversion Pr
-		finish = wc.PrintStart("Fetching Version PR")
+		finish = wc.PrintStart("Fetching Version PR by name: '%s'", versionPRName)
 		versionPR, err = wh.FetchPRByTitle(ghClient, versionPRName)
 		if err != nil {
 			return Meta{}, errs.Wrap(err, "failed to get target PR")
 		}
 		if versionPR != nil && versionPR.GetState() != "open" {
 			return Meta{}, errs.New("PR status for %s is not open, make sure your jira fixVersion is targeting an unreleased version", versionPR.GetTitle())
+		}
+		if versionPR == nil {
+			wc.Print("No version PR found")
 		}
 		finish()
 	}
@@ -166,7 +200,7 @@ func fetchMeta(ghClient *github.Client, jiraClient *jira.Client, prNumber int) (
 		ActiveVersion:     fixVersion,
 		ActiveJiraVersion: jiraVersion.Name,
 		VersionPRName:     versionPRName,
-		VersionBranchName: wh.VersionedBranchName(fixVersion),
+		TargetBranchName:  wh.VersionedBranchName(fixVersion.Version),
 		VersionPR:         versionPR,
 	}
 
